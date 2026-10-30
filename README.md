@@ -1,3 +1,31 @@
+<!-- <FILE>README.md</FILE> - <DESC>Personal AC86U fork notice and upstream OpenWrt overview.</DESC> -->
+<!-- <VERS>VERSION: 0.1.0</VERS> -->
+<!-- <WCTX>Make the personal project's scope, tested hardware and use-at-own-risk terms clear.</WCTX> -->
+<!-- <CLOG>Add the AC86U R1.5 experimental-use notice while preserving upstream project and license information.</CLOG> -->
+
+# ASUS RT-AC86U personal fork
+
+**Experimental firmware: use entirely at your own risk.**
+
+This is a personal OpenWrt fork, made available in the hope that others find it
+useful. It is not an official ASUS or OpenWrt release.
+
+Testing has been performed only on **ASUS RT-AC86U hardware revision R1.5**.
+Compatibility with other hardware revisions or other ASUS models has not been
+verified. The AC86U images are intended only for the ASUS RT-AC86U.
+
+The firmware and accompanying tools are provided **as is, without warranty of
+any kind**. Flashing or using them may erase settings or leave a device unusable.
+To the extent permitted by applicable law, the author accepts no responsibility
+or liability for damage, data loss or other consequences of their use. There is
+no commitment to ongoing maintenance, support or updates.
+
+Existing upstream licenses and notices remain applicable. See
+[CHANGELOG-RT-AC86U.md](CHANGELOG-RT-AC86U.md) for the change record and
+[contrib/ac86u/README.md](contrib/ac86u/README.md) for the build environment.
+
+## Upstream OpenWrt project
+
 ![OpenWrt logo](include/logo.png)
 
 OpenWrt Project is a Linux operating system targeting embedded devices. Instead
@@ -106,3 +134,6 @@ For a list of supported devices see the [OpenWrt Hardware Database](https://open
 ## License
 
 OpenWrt is licensed under GPL-2.0
+
+<!-- <FILE>README.md</FILE> - <DESC>Personal AC86U fork notice and upstream OpenWrt overview.</DESC> -->
+<!-- <VERS>END OF VERSION: 0.1.0</VERS> -->

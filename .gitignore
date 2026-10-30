@@ -1,3 +1,7 @@
+# <FILE>.gitignore</FILE> - <DESC>Upstream build ignores and AC86U generated operator artifacts.</DESC>
+# <VERS>VERSION: 0.1.1</VERS>
+# <WCTX>Keep generated identity, logs and recovery plans out of source commits.</WCTX>
+# <CLOG>Exclude generated AC86U identity, operator outputs and test caches while retaining upstream rules.</CLOG>
 *.o
 .DS_Store
 .*.swp
@@ -35,3 +39,16 @@ git-src
 .cproject
 .ccache
 .vscode*
+
+# AC86U generated build identity and operator outputs
+/.port/
+/contrib/ac86u/**/__pycache__/
+/contrib/ac86u/**/.pytest_cache/
+/.pytest_cache/
+/files/etc/banner
+/files/usr/lib/ac86u-build.json
+/contrib/ac86u/tools/windows-recovery/*.log
+/contrib/ac86u/tools/windows-recovery/plan*.json
+/contrib/ac86u/tools/windows-recovery/status.json
+# <FILE>.gitignore</FILE> - <DESC>Upstream build ignores and AC86U generated operator artifacts.</DESC>
+# <VERS>END OF VERSION: 0.1.1</VERS>

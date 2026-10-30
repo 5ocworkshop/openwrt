@@ -1,0 +1,18 @@
+# <FILE>contrib/ac86u/config.seed</FILE> - <DESC>Portable single-device AC86U release seed with plain LuCI.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Preserve upstream networking and leave hardware defaults to board support.</WCTX>
+# <CLOG>Select one AC86U profile and OEM metadata without private host or unit data.</CLOG>
+CONFIG_TARGET_bcm4908=y
+CONFIG_TARGET_bcm4908_generic=y
+CONFIG_TARGET_bcm4908_generic_DEVICE_asus_rt-ac86u=y
+# CONFIG_TARGET_MULTI_PROFILE is not set
+# CONFIG_TARGET_ALL_PROFILES is not set
+CONFIG_PACKAGE_luci=y
+# CONFIG_PACKAGE_luci-ssl is not set
+# CONFIG_PACKAGE_luci-ssl-openssl is not set
+CONFIG_IMAGEOPT=y
+CONFIG_VERSIONOPT=y
+CONFIG_VERSION_MANUFACTURER="ASUS"
+CONFIG_VERSION_PRODUCT="RT-AC86U"
+# <FILE>contrib/ac86u/config.seed</FILE> - <DESC>Portable single-device AC86U release seed with plain LuCI.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>
