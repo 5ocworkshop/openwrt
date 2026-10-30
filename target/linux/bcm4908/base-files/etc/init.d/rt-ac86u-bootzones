@@ -1,0 +1,146 @@
+#!/bin/sh /etc/rc.common
+# <FILE>target/linux/bcm4908/base-files/etc/init.d/rt-ac86u-bootzones</FILE> - <DESC>Finish the userspace boot-zone startup indication at the S99 checkpoint.</DESC>
+# <VERS>VERSION: 0.5.0</VERS>
+# <WCTX>Restore normal indicator policy from a fresh snapshot after kernel-owned boot animation releases control.</WCTX>
+# <CLOG>Delegate WAN reconciliation after standard LED reload without interpreting logical interface-up or duplicating override policy.</CLOG>
+
+export START=99
+# rc.common reads these after sourcing; keep dispatcher flags out of child environments.
+# shellcheck disable=SC2034
+USE_PROCD=1
+# shellcheck disable=SC2034
+EXTRA_COMMANDS='finish'
+export EXTRA_HELP='        Diagnostic handoff requires healthy zone4 readiness; no WAN-up requirement.
+        finish runs the bounded completion task; ordinary start submits it to procd.
+        Completion polls every 100ms for at most 50 waits; fractional sleep is required.
+        RTAC86U_DIAG_COMPATIBLE/WAYPOINT/KMSG override their /sys and /dev paths.
+        RTAC86U_DIAG_LED_INIT/WAN_HOOK override normal policy hooks for tests.
+        RTAC86U_DIAG_BUSYBOX overrides /bin/busybox for atomic command and log writes.'
+
+start_service() {
+	procd_open_instance completion
+	procd_set_param command /etc/init.d/rt-ac86u-bootzones finish
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+finish() {
+	rtac86u_zone_compatible="${RTAC86U_DIAG_COMPATIBLE:-/sys/firmware/devicetree/base/compatible}"
+	rtac86u_zone_waypoint="${RTAC86U_DIAG_WAYPOINT:-/sys/class/leds/lan1/device/boot_waypoint}"
+	rtac86u_zone_kmsg="${RTAC86U_DIAG_KMSG:-/dev/kmsg}"
+	rtac86u_zone_busybox="${RTAC86U_DIAG_BUSYBOX:-/bin/busybox}"
+	rtac86u_zone_led_init="${RTAC86U_DIAG_LED_INIT:-/etc/init.d/led}"
+	rtac86u_zone_wan_hook="${RTAC86U_DIAG_WAN_HOOK:-/etc/hotplug.d/iface/95-rt-ac86u-wan-led}"
+	[ -r "$rtac86u_zone_compatible" ] && [ -e "$rtac86u_zone_waypoint" ] || return 0
+	tr '\000' '\n' < "$rtac86u_zone_compatible" | grep -Fxq 'asus,rt-ac86u' || return 0
+	rtac86u_zone_error=''
+	rtac86u_zone_new_release=0
+	if [ ! -x "$rtac86u_zone_busybox" ] || [ ! -x "$rtac86u_zone_led_init" ] || [ ! -x "$rtac86u_zone_wan_hook" ] || ! command -v sleep >/dev/null 2>&1; then
+		rtac86u_zone_error='normal LED policy support is unavailable'
+	else
+		rtac86u_zone_phase=initial
+		rtac86u_zone_waits=0
+		while :; do
+			if ! rtac86u_zone_state=$(cat "$rtac86u_zone_waypoint" 2>/dev/null); then
+				rtac86u_zone_error="cannot read provider during $rtac86u_zone_phase"
+				break
+			fi
+			rtac86u_zone_seen='|'
+			rtac86u_zone_completed='' rtac86u_zone_zone='' rtac86u_zone_step=''
+			rtac86u_zone_failed='' rtac86u_zone_panic='' rtac86u_zone_released='' rtac86u_zone_finishing=''
+			for rtac86u_zone_field in $rtac86u_zone_state; do
+				case "$rtac86u_zone_field" in
+				completed=*|zone=*|step=*|failed=*|panic=*|released=*|finishing=*)
+					rtac86u_zone_key="${rtac86u_zone_field%%=*}"
+					rtac86u_zone_value="${rtac86u_zone_field#*=}"
+					case "$rtac86u_zone_seen" in *"|$rtac86u_zone_key|"*) rtac86u_zone_error='duplicate provider field' ;; esac
+					rtac86u_zone_seen="$rtac86u_zone_seen$rtac86u_zone_key|"
+					case "$rtac86u_zone_key" in
+					completed) rtac86u_zone_completed="$rtac86u_zone_value" ;;
+					zone) rtac86u_zone_zone="$rtac86u_zone_value" ;;
+					step) rtac86u_zone_step="$rtac86u_zone_value" ;;
+					failed) rtac86u_zone_failed="$rtac86u_zone_value" ;;
+					panic) rtac86u_zone_panic="$rtac86u_zone_value" ;;
+					released) rtac86u_zone_released="$rtac86u_zone_value" ;;
+					finishing) rtac86u_zone_finishing="$rtac86u_zone_value" ;;
+					esac
+					;;
+				esac
+			done
+			[ -z "$rtac86u_zone_error" ] || break
+			case "$rtac86u_zone_completed" in
+			[0-9a-fA-F]) rtac86u_zone_mask=$((0x$rtac86u_zone_completed)) ;;
+			0x[0-9a-fA-F]|0x0[0-9a-fA-F]) rtac86u_zone_mask=$((rtac86u_zone_completed)) ;;
+			*) rtac86u_zone_error='missing or malformed completion mask'; break ;;
+			esac
+			case "$rtac86u_zone_released" in 0|1) ;; *) rtac86u_zone_error='missing or malformed release state'; break ;; esac
+			case "$rtac86u_zone_finishing" in 0|1) ;; *) rtac86u_zone_error='missing or malformed finishing state'; break ;; esac
+			if [ "$rtac86u_zone_failed:$rtac86u_zone_panic" != '0:0' ]; then
+				rtac86u_zone_error='failed, panicked or malformed provider state'
+				break
+			fi
+			if [ "$rtac86u_zone_zone" != 4 ] || [ $((rtac86u_zone_mask & 7)) -ne 7 ]; then
+				rtac86u_zone_error='provider has not completed prerequisites for zone4'
+				break
+			fi
+			case "$rtac86u_zone_step" in 2|3|4) ;; *) rtac86u_zone_error='provider has not reached the overlay checkpoint'; break ;; esac
+			if [ "$rtac86u_zone_released" = 1 ]; then
+				if [ "$rtac86u_zone_mask:$rtac86u_zone_step:$rtac86u_zone_finishing" != '15:4:0' ]; then
+					rtac86u_zone_error='inconsistent released state'
+				fi
+				break
+			fi
+			if [ "$rtac86u_zone_finishing" = 1 ]; then
+				if [ "$rtac86u_zone_mask:$rtac86u_zone_step" != '15:4' ]; then
+					rtac86u_zone_error='inconsistent completion animation state'
+					break
+				fi
+				rtac86u_zone_phase=released
+			elif [ "$rtac86u_zone_phase" = released ]; then
+				rtac86u_zone_error='provider did not confirm diagnostic release'
+				break
+			fi
+			case "$rtac86u_zone_phase" in
+			initial)
+				if ! "$rtac86u_zone_busybox" echo 'complete' > "$rtac86u_zone_waypoint"; then
+					rtac86u_zone_error='startup completion write failed'
+					break
+				fi
+				rtac86u_zone_new_release=1
+				rtac86u_zone_phase=released
+				;;
+			released)
+				if [ "$rtac86u_zone_waits" -ge 50 ]; then
+					rtac86u_zone_error='completion animation timed out'
+					break
+				fi
+				if ! sleep 0.1; then
+					rtac86u_zone_error='completion wait failed'
+					break
+				fi
+				rtac86u_zone_waits=$((rtac86u_zone_waits + 1))
+				;;
+			esac
+		done
+	fi
+	if [ -z "$rtac86u_zone_error" ]; then
+		if [ "$rtac86u_zone_new_release" -eq 1 ]; then
+			"$rtac86u_zone_busybox" echo '<6>rt-ac86u-bootzones: diagnostics released; restoring normal LED policy' >> "$rtac86u_zone_kmsg" 2>/dev/null || :
+		fi
+		if ! "$rtac86u_zone_led_init" reload; then
+			rtac86u_zone_error='normal LED policy reload failed after release'
+		elif ! INTERFACE=wan ACTION=ifupdate "$rtac86u_zone_wan_hook"; then
+			rtac86u_zone_error='WAN warning reconciliation failed after release'
+		fi
+	fi
+	if [ -n "$rtac86u_zone_error" ]; then
+		"$rtac86u_zone_busybox" echo "<3>rt-ac86u-bootzones: $rtac86u_zone_error" >> "$rtac86u_zone_kmsg" 2>/dev/null || :
+		printf 'rt-ac86u-bootzones: %s\n' "$rtac86u_zone_error" >&2
+		return 1
+	fi
+	return 0
+}
+
+# <FILE>target/linux/bcm4908/base-files/etc/init.d/rt-ac86u-bootzones</FILE> - <DESC>Finish the userspace boot-zone startup indication at the S99 checkpoint.</DESC>
+# <VERS>END OF VERSION: 0.5.0</VERS>

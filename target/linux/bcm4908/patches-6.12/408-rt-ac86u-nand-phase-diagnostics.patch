@@ -1,0 +1,426 @@
+# <FILE>target/linux/bcm4908/patches-6.12/408-rt-ac86u-nand-phase-diagnostics.patch</FILE> - <DESC>Observe NAND scan, MTD discovery, UBI validation and attach outcomes separately.</DESC>
+# <VERS>VERSION: 0.1.2</VERS>
+# <WCTX>Localize the missing-UBI failure without changing storage or command-backend policy.</WCTX>
+# <CLOG>Match the preceding core/header metadata after atomic startup finalization; retain storage diagnostics unchanged.</CLOG>
+
+--- a/include/linux/rtac86u_bootwaypoints.h
++++ b/include/linux/rtac86u_bootwaypoints.h
+@@ -1,7 +1,7 @@
+ /* <FILE>include/linux/rtac86u_bootwaypoints.h</FILE> - <DESC>Board-scoped boot waypoint facts and copied snapshots without LED callbacks.</DESC> */
+-/* <VERS>VERSION: 0.1.1</VERS> */
++/* <VERS>VERSION: 0.2.0</VERS> */
+ /* <WCTX>Share four-zone boot state between narrow kernel hooks and the LED register owner.</WCTX> */
+-/* <CLOG>Declare atomic startup finalization with a disabled-provider stub.</CLOG> */
++/* <CLOG>Append measured storage returns and separate platform chronology from probe health.</CLOG> */
+ #ifndef _LINUX_RTAC86U_BOOTWAYPOINTS_H
+ #define _LINUX_RTAC86U_BOOTWAYPOINTS_H
+ #include <linux/kconfig.h>
+@@ -29,6 +29,28 @@
+ 	RTAC86U_WP_DRIVER_OPEN,
+ 	RTAC86U_WP_UBI_OPEN,
+ 	RTAC86U_WP_BDEV_READY,
++	RTAC86U_WP_NAND_PROBE_RESULT,
++	RTAC86U_WP_NAND_SCAN_RESULT,
++	RTAC86U_WP_MTD_REGISTER_RESULT,
++	RTAC86U_WP_UBI_LOOKUP_RESULT,
++	RTAC86U_WP_UBI_FALLBACK_RESULT,
++	RTAC86U_WP_UBI_MAGIC_READ_RESULT,
++	RTAC86U_WP_UBI_MAGIC_LENGTH,
++	RTAC86U_WP_UBI_MAGIC_FOUND,
++	RTAC86U_WP_UBI_ATTACH_RESULT,
++	RTAC86U_WP_PLATFORM_PHASE_DONE,
++};
++
++enum rtac86u_wp_storage_seen {
++	RTAC86U_WP_SEEN_PROBE = 1U << 0,
++	RTAC86U_WP_SEEN_SCAN = 1U << 1,
++	RTAC86U_WP_SEEN_MTD = 1U << 2,
++	RTAC86U_WP_SEEN_LOOKUP = 1U << 3,
++	RTAC86U_WP_SEEN_FALLBACK = 1U << 4,
++	RTAC86U_WP_SEEN_MAGIC = 1U << 5,
++	RTAC86U_WP_SEEN_LENGTH = 1U << 6,
++	RTAC86U_WP_SEEN_VALIDATION = 1U << 7,
++	RTAC86U_WP_SEEN_ATTACH = 1U << 8,
+ };
+ 
+ struct rtac86u_wp_snapshot {
+@@ -40,6 +62,21 @@
+ 	int error;
+ 	unsigned int root_dev;
+ 	unsigned int root_disk;
++	unsigned int storage_seen;
++	unsigned int platform_health_mask;
++	int nand_probe_result;
++	int nand_scan_result;
++	unsigned int nand_id;
++	unsigned int nand_id_length;
++	int mtd_register_result;
++	int ubi_lookup_result;
++	int ubi_fallback_result;
++	unsigned int ubi_mtd_index;
++	int ubi_magic_result;
++	unsigned int ubi_magic_length;
++	unsigned int ubi_magic;
++	bool ubi_magic_found;
++	int ubi_attach_result;
+ };
+ 
+ #if IS_BUILTIN(CONFIG_LEDS_BCM63138) || defined(RTAC86U_WP_PROVIDER)
+@@ -68,4 +105,4 @@
+ #endif
+ #endif
+ /* <FILE>include/linux/rtac86u_bootwaypoints.h</FILE> - <DESC>Board-scoped boot waypoint facts and copied snapshots without LED callbacks.</DESC> */
+-/* <VERS>END OF VERSION: 0.1.1</VERS> */
++/* <VERS>END OF VERSION: 0.2.0</VERS> */
+--- a/drivers/leds/blink/rtac86u-bootwaypoints.c
++++ b/drivers/leds/blink/rtac86u-bootwaypoints.c
+@@ -1,8 +1,8 @@
+ // SPDX-License-Identifier: GPL-2.0
+ /* <FILE>drivers/leds/blink/rtac86u-bootwaypoints.c</FILE> - <DESC>Board-local waypoint facts and root-mount failure scope without hardware callbacks.</DESC> */
+-/* <VERS>VERSION: 0.1.1</VERS> */
++/* <VERS>VERSION: 0.2.1</VERS> */
+ /* <WCTX>Separate precise boot state from the LED provider's register and pulse scheduling ownership.</WCTX> */
+-/* <CLOG>Validate private preinit success before atomically recording the final startup waypoints.</CLOG> */
++/* <CLOG>Use an observed successful primary or fallback partition lookup while preserving both raw results.</CLOG> */
+ #define RTAC86U_WP_PROVIDER
+ #include <linux/rtac86u_bootwaypoints.h>
+ #include <linux/errno.h>
+@@ -36,6 +36,8 @@
+ 		return;
+ 	if (phase == RTAC86U_WP_DONE) {
+ 		wp.success[zone - 1] |= BIT(step - 1);
++		if (zone == 1)
++			wp.snapshot.platform_health_mask = wp.success[0];
+ 		if (wp.success[zone - 1] == 0xf)
+ 			wp.snapshot.completed_mask |= BIT(zone - 1);
+ 		/* Completing an outer operation must not erase nested progress. */
+@@ -60,14 +62,119 @@
+ 	return 9;
+ }
+ 
++static unsigned int rtac86u_wp_storage_phase_locked(void)
++{
++	struct rtac86u_wp_snapshot *s = &wp.snapshot;
++
++	if (!(s->storage_seen & RTAC86U_WP_SEEN_SCAN) || s->nand_scan_result)
++		return 1;
++	if ((s->storage_seen & RTAC86U_WP_SEEN_PROBE) && s->nand_probe_result &&
++	    (!(s->storage_seen & RTAC86U_WP_SEEN_MTD) || !s->mtd_register_result))
++		return 1;
++	if (!(s->storage_seen & RTAC86U_WP_SEEN_MTD) || s->mtd_register_result ||
++	    !(((s->storage_seen & RTAC86U_WP_SEEN_LOOKUP) &&
++	       !s->ubi_lookup_result) ||
++	      ((s->storage_seen & RTAC86U_WP_SEEN_FALLBACK) &&
++	       !s->ubi_fallback_result)))
++		return 2;
++	if (!(s->storage_seen & RTAC86U_WP_SEEN_MAGIC) ||
++	    !(s->storage_seen & RTAC86U_WP_SEEN_LENGTH) ||
++	    (s->ubi_magic_result && s->ubi_magic_result != -EUCLEAN) ||
++	    s->ubi_magic_length != 4 ||
++	    !(s->storage_seen & RTAC86U_WP_SEEN_VALIDATION) || !s->ubi_magic_found)
++		return 3;
++	return 4;
++}
++
++static bool rtac86u_wp_storage_event_locked(unsigned int event,
++					   unsigned int value, int error)
++{
++	struct rtac86u_wp_snapshot *s = &wp.snapshot;
++
++	if (event == RTAC86U_WP_PLATFORM_PHASE_DONE) {
++		/* A traversed phase does not manufacture individual probe successes. */
++		s->completed_mask |= BIT(0);
++		return true;
++	}
++	if (!wp.precise)
++		return false;
++	switch (event) {
++	case RTAC86U_WP_NAND_PROBE_RESULT:
++		s->storage_seen |= RTAC86U_WP_SEEN_PROBE;
++		s->nand_probe_result = error;
++		if (error && !(s->storage_seen & RTAC86U_WP_SEEN_SCAN))
++			rtac86u_wp_step_locked(2, 1, RTAC86U_WP_ERROR);
++		break;
++	case RTAC86U_WP_NAND_SCAN_RESULT:
++		s->storage_seen |= RTAC86U_WP_SEEN_SCAN;
++		s->nand_scan_result = error;
++		s->nand_id = value & 0xffff;
++		s->nand_id_length = value >> 16;
++		rtac86u_wp_step_locked(2, 1, error ? RTAC86U_WP_ERROR : RTAC86U_WP_DONE);
++		break;
++	case RTAC86U_WP_MTD_REGISTER_RESULT:
++		s->storage_seen |= RTAC86U_WP_SEEN_MTD;
++		s->mtd_register_result = error;
++		rtac86u_wp_step_locked(2, 2, error ? RTAC86U_WP_ERROR : RTAC86U_WP_ENTER);
++		break;
++	case RTAC86U_WP_UBI_LOOKUP_RESULT:
++		s->storage_seen |= RTAC86U_WP_SEEN_LOOKUP;
++		s->ubi_lookup_result = error;
++		if (!error)
++			s->ubi_mtd_index = value;
++		rtac86u_wp_step_locked(2, 2, error ? RTAC86U_WP_ERROR : RTAC86U_WP_ENTER);
++		break;
++	case RTAC86U_WP_UBI_FALLBACK_RESULT:
++		s->storage_seen |= RTAC86U_WP_SEEN_FALLBACK;
++		s->ubi_fallback_result = error;
++		if (!error)
++			s->ubi_mtd_index = value;
++		break;
++	case RTAC86U_WP_UBI_MAGIC_READ_RESULT:
++		s->storage_seen |= RTAC86U_WP_SEEN_MAGIC;
++		s->ubi_magic_result = error;
++		s->ubi_magic = value;
++		rtac86u_wp_step_locked(2, 3, error && error != -EUCLEAN ?
++			RTAC86U_WP_ERROR : RTAC86U_WP_ENTER);
++		break;
++	case RTAC86U_WP_UBI_MAGIC_LENGTH:
++		s->storage_seen |= RTAC86U_WP_SEEN_LENGTH;
++		s->ubi_magic_length = value;
++		break;
++	case RTAC86U_WP_UBI_MAGIC_FOUND:
++		s->storage_seen |= RTAC86U_WP_SEEN_VALIDATION;
++		s->ubi_magic_found = !!value;
++		if (value && s->ubi_magic_length == 4 &&
++		    (!s->ubi_magic_result || s->ubi_magic_result == -EUCLEAN))
++			rtac86u_wp_step_locked(2, 3, RTAC86U_WP_DONE);
++		break;
++	case RTAC86U_WP_UBI_ATTACH_RESULT:
++		s->storage_seen |= RTAC86U_WP_SEEN_ATTACH;
++		s->ubi_attach_result = error;
++		if (error >= 0)
++			wp.ubi_attached = true;
++		rtac86u_wp_step_locked(2, 4, error < 0 ? RTAC86U_WP_ERROR : RTAC86U_WP_DONE);
++		break;
++	default:
++		return false;
++	}
++	if ((s->storage_seen & RTAC86U_WP_SEEN_MTD) && !s->mtd_register_result &&
++	    (((s->storage_seen & RTAC86U_WP_SEEN_LOOKUP) &&
++	      !s->ubi_lookup_result) ||
++	     ((s->storage_seen & RTAC86U_WP_SEEN_FALLBACK) &&
++	      !s->ubi_fallback_result)))
++		rtac86u_wp_step_locked(2, 2, RTAC86U_WP_DONE);
++	return true;
++}
++
+ static void rtac86u_wp_failure_zone_locked(unsigned int site)
+ {
+ 	if (site == 1) {
+ 		wp.snapshot.active_zone = 2;
+-		wp.snapshot.substep = 3;
++		wp.snapshot.substep = rtac86u_wp_storage_phase_locked();
+ 	} else if (site >= 2 && site <= 4) {
+-		wp.snapshot.active_zone = 2;
+-		wp.snapshot.substep = 4;
++		wp.snapshot.active_zone = 3;
++		wp.snapshot.substep = 1;
+ 	} else {
+ 		wp.snapshot.active_zone = 3;
+ 		wp.snapshot.substep = site == 6 ? 1 :
+@@ -123,12 +230,18 @@
+ 	case 2: rtac86u_wp_step_locked(1, 2, phase); break;
+ 	case 4: rtac86u_wp_step_locked(1, 3, phase); break;
+ 	case 5: rtac86u_wp_step_locked(1, 4, phase); break;
+-	case 3: rtac86u_wp_step_locked(2, 1, phase); break;
+-	case 6: rtac86u_wp_step_locked(2, 2, phase); break;
++	case 3:
++		if (phase == RTAC86U_WP_ENTER)
++			rtac86u_wp_step_locked(2, 1, phase);
++		break;
++	case 6:
++		if (phase == RTAC86U_WP_ENTER)
++			rtac86u_wp_step_locked(2, 2, phase);
++		break;
+ 	case 7:
+ 		if (phase == RTAC86U_WP_DONE)
+ 			wp.ubi_attached = true;
+-		rtac86u_wp_step_locked(2, 3, phase);
++		rtac86u_wp_step_locked(2, 4, phase);
+ 		break;
+ 	case 8:
+ 	case 9:
+@@ -162,11 +275,13 @@
+ 	spin_lock_irqsave(&rtac86u_wp_lock, flags);
+ 	if (!wp.enabled || wp.frozen)
+ 		goto out;
++	if (rtac86u_wp_storage_event_locked(event, value, error))
++		goto out;
+ 	switch (event) {
+ 	case RTAC86U_WP_UBI_ATTACHED:
+ 		if (!error) {
+ 			wp.ubi_attached = true;
+-			rtac86u_wp_step_locked(2, 3, RTAC86U_WP_DONE);
++			rtac86u_wp_step_locked(2, 4, RTAC86U_WP_DONE);
+ 		}
+ 		goto out;
+ 	case RTAC86U_WP_ROOT_DISK_REGISTERED:
+@@ -174,7 +289,6 @@
+ 			wp.root_disk_ready = true;
+ 			wp.root_disk_failed = false;
+ 			wp.snapshot.root_disk = value;
+-			rtac86u_wp_step_locked(2, 4, RTAC86U_WP_DONE);
+ 		}
+ 		goto out;
+ 	}
+@@ -306,4 +420,4 @@
+ MODULE_LICENSE("GPL");
+ MODULE_DESCRIPTION("RT-AC86U opt-in boot waypoint and root failure facts");
+ /* <FILE>drivers/leds/blink/rtac86u-bootwaypoints.c</FILE> - <DESC>Board-local waypoint facts and root-mount failure scope without hardware callbacks.</DESC> */
+-/* <VERS>END OF VERSION: 0.1.1</VERS> */
++/* <VERS>END OF VERSION: 0.2.1</VERS> */
+--- a/drivers/mtd/nand/raw/brcmnand/bcmbca_nand.c
++++ b/drivers/mtd/nand/raw/brcmnand/bcmbca_nand.c
+@@ -5,6 +5,7 @@
+ 
+ #include <linux/device.h>
+ #include <linux/rtac86u_bootdiag.h>
++#include <linux/rtac86u_bootwaypoints.h>
+ #include <linux/io.h>
+ #include <linux/ioport.h>
+ #include <linux/module.h>
+@@ -113,6 +114,7 @@
+ 
+ 	rtac86u_bootdiag_checkpoint(3, 0);
+ 	ret = bcmbca_nand_probe_without_bootdiag(pdev);
++	rtac86u_wp_event(RTAC86U_WP_NAND_PROBE_RESULT, 0, ret);
+ 	rtac86u_bootdiag_checkpoint(3, ret ? 2 : 1);
+ 	return ret;
+ }
+--- a/drivers/mtd/nand/raw/brcmnand/brcmnand.c
++++ b/drivers/mtd/nand/raw/brcmnand/brcmnand.c
+@@ -24,6 +24,7 @@
+ #include <linux/mtd/rawnand.h>
+ #include <linux/mtd/partitions.h>
+ #include <linux/of.h>
++#include <linux/rtac86u_bootwaypoints.h>
+ #include <linux/of_platform.h>
+ #include <linux/slab.h>
+ #include <linux/static_key.h>
+@@ -3098,10 +3099,20 @@
+ 		      nand_readreg(ctrl, cfg_offs) & ~CFG_BUS_WIDTH);
+ 
+ 	ret = nand_scan(chip, 1);
++	if (host->cs == 0) {
++		unsigned int id = 0;
++
++		if (chip->id.len >= 2)
++			id = ((unsigned int)chip->id.data[0] << 8) | chip->id.data[1];
++		rtac86u_wp_event(RTAC86U_WP_NAND_SCAN_RESULT,
++				 ((unsigned int)chip->id.len << 16) | id, ret);
++	}
+ 	if (ret)
+ 		return ret;
+ 
+ 	ret = mtd_device_parse_register(mtd, part_probe_types, NULL, NULL, 0);
++	if (host->cs == 0)
++		rtac86u_wp_event(RTAC86U_WP_MTD_REGISTER_RESULT, 0, ret);
+ 	if (ret)
+ 		nand_cleanup(chip);
+ 
+--- a/drivers/mtd/ubi/build.c
++++ b/drivers/mtd/ubi/build.c
+@@ -1280,13 +1280,20 @@
+ 	struct mtd_info *mtd;
+ 	struct device_node *np;
+ 	loff_t offset = 0;
+-	size_t len;
++	size_t len = 0;
+ 	char magic[4];
+ 
+ 	/* try attaching mtd device named "ubi" or "data" */
+ 	mtd = open_mtd_device("ubi");
+-	if (IS_ERR(mtd))
++	rtac86u_wp_event(RTAC86U_WP_UBI_LOOKUP_RESULT,
++			 IS_ERR(mtd) ? 0 : mtd->index,
++			 IS_ERR(mtd) ? PTR_ERR(mtd) : 0);
++	if (IS_ERR(mtd)) {
+ 		mtd = open_mtd_device("data");
++		rtac86u_wp_event(RTAC86U_WP_UBI_FALLBACK_RESULT,
++				 IS_ERR(mtd) ? 0 : mtd->index,
++				 IS_ERR(mtd) ? PTR_ERR(mtd) : 0);
++	}
+ 
+ 	if (IS_ERR(mtd)) {
+ 		rtac86u_bootdiag_checkpoint(6, 2);
+@@ -1313,6 +1320,11 @@
+ 
+ 	/* check if the read from flash was successful */
+ 	err = mtd_read(mtd, offset, 4, &len, (void *) magic);
++	rtac86u_wp_event(RTAC86U_WP_UBI_MAGIC_READ_RESULT,
++		len == 4 ? ((unsigned int)(u8)magic[0] << 24) |
++		((unsigned int)(u8)magic[1] << 16) |
++		((unsigned int)(u8)magic[2] << 8) | (u8)magic[3] : 0, err);
++	rtac86u_wp_event(RTAC86U_WP_UBI_MAGIC_LENGTH, len, 0);
+ 	if ((err && !mtd_is_bitflip(err)) || len != 4) {
+ 		rtac86u_bootdiag_checkpoint(6, 2);
+ 		pr_err("UBI error: unable to read from mtd%d\n", mtd->index);
+@@ -1321,10 +1333,13 @@
+ 
+ 	/* check for a valid ubi magic */
+ 	if (strncmp(magic, "UBI#", 4)) {
++		rtac86u_wp_event(RTAC86U_WP_UBI_MAGIC_FOUND, 0, 0);
+ 		rtac86u_bootdiag_checkpoint(6, 2);
+ 		pr_err("UBI error: no valid UBI magic found inside mtd%d\n", mtd->index);
+ 		goto cleanup;
+ 	}
++
++	rtac86u_wp_event(RTAC86U_WP_UBI_MAGIC_FOUND, 1, 0);
+ 
+ 	/* don't auto-add media types where UBI doesn't makes sense */
+ 	if (mtd->type != MTD_NANDFLASH &&
+@@ -1336,6 +1351,7 @@
+ 	mutex_lock(&ubi_devices_mutex);
+ 	pr_notice("UBI: auto-attach mtd%d\n", mtd->index);
+ 	err = ubi_attach_mtd_dev(mtd, UBI_DEV_NUM_AUTO, 0, 0, false, false);
++	rtac86u_wp_event(RTAC86U_WP_UBI_ATTACH_RESULT, mtd->index, err);
+ 	mutex_unlock(&ubi_devices_mutex);
+ 	if (err < 0) {
+ 		rtac86u_bootdiag_checkpoint(6, 2);
+--- a/init/main.c
++++ b/init/main.c
+@@ -14,6 +14,7 @@
+ 
+ #include <linux/types.h>
+ #include <linux/rtac86u_bootdiag.h>
++#include <linux/rtac86u_bootwaypoints.h>
+ #include <linux/extable.h>
+ #include <linux/module.h>
+ #include <linux/proc_fs.h>
+@@ -1575,6 +1576,7 @@
+ 	page_alloc_init_late();
+ 
+ 	do_basic_setup();
++	rtac86u_wp_event(RTAC86U_WP_PLATFORM_PHASE_DONE, 0, 0);
+ 
+ 	kunit_run_all_tests();
+ 
+--- a/drivers/leds/blink/leds-bcm63138.c
++++ b/drivers/leds/blink/leds-bcm63138.c
+@@ -362,10 +362,22 @@
+ 
+ 	rtac86u_wp_snapshot(&snapshot);
+ 	return sysfs_emit(buf,
+-		"completed=%x zone=%u step=%u failed=%u site=%u errno=%d root_dev=%u root_disk=%u\n",
++		"completed=%x zone=%u step=%u failed=%u site=%u errno=%d root_dev=%u root_disk=%u "
++		"storage_seen=%x platform_health=%x nand_probe=%d nand_scan=%d "
++		"nand_id=%04x nand_id_len=%u mtd_register=%d ubi_lookup=%d "
++		"ubi_fallback=%d ubi_mtd=%u ubi_magic_result=%d ubi_magic_len=%u "
++		"ubi_magic=%08x ubi_magic_found=%u ubi_attach=%d\n",
+ 		snapshot.completed_mask, snapshot.active_zone, snapshot.substep,
+ 		snapshot.failed, snapshot.site, snapshot.error,
+-		snapshot.root_dev, snapshot.root_disk);
++		snapshot.root_dev, snapshot.root_disk,
++		snapshot.storage_seen, snapshot.platform_health_mask,
++		snapshot.nand_probe_result, snapshot.nand_scan_result,
++		snapshot.nand_id, snapshot.nand_id_length,
++		snapshot.mtd_register_result, snapshot.ubi_lookup_result,
++		snapshot.ubi_fallback_result, snapshot.ubi_mtd_index,
++		snapshot.ubi_magic_result, snapshot.ubi_magic_length,
++		snapshot.ubi_magic, snapshot.ubi_magic_found,
++		snapshot.ubi_attach_result);
+ }
+ 
+ static ssize_t boot_waypoint_store(struct device *dev,
+
+# <FILE>target/linux/bcm4908/patches-6.12/408-rt-ac86u-nand-phase-diagnostics.patch</FILE> - <DESC>Observe NAND scan, MTD discovery, UBI validation and attach outcomes separately.</DESC>
+# <VERS>END OF VERSION: 0.1.2</VERS>

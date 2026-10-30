@@ -1,0 +1,332 @@
+#!/bin/sh
+# <FILE>target/linux/bcm4908/base-files/usr/libexec/ac86u-radio-nvram</FILE> - <DESC>Validate preserved per-device radio settings and publish private RAM firmware inputs.</DESC>
+# <VERS>VERSION: 0.1.1</VERS>
+# <WCTX>Use stock brcmfmac with this router's preserved settings without embedding per-device values.</WCTX>
+# <CLOG>Publish validated per-device radio settings atomically with bounded read-only discovery and strict RAM output ownership.</CLOG>
+
+set -eu
+umask 077
+LC_ALL=C
+export LC_ALL
+
+source_file=
+output=/tmp/ac86u-radio-nvram
+compatible=/sys/firmware/devicetree/base/compatible
+mtd_proc=/proc/mtd
+device_root=/dev
+dry_run=0
+lock_owned=0
+marker_owned=0
+published=0
+mounted=0
+mount_dir=
+stage=
+prefix=brcmfmac4366c-pcie.asus,rt-ac86u-radio
+
+fail() {
+    printf '[ac86u-radio-nvram] %s\n' "$1" >&2
+    exit 1
+}
+
+usage() {
+    printf '%s\n' \
+        'Usage: ac86u-radio-nvram [--source FILE] [--output-dir DIR]' \
+        '       [--compatible FILE] [--mtd-proc FILE] [--device-root DIR]' \
+        '       [--dry-run] [--help]' \
+        'Read preserved AC86U radio settings; never write flash or change devices.' \
+        'Without --source, mount the unique data MTD as JFFS2 ro,noatime.' \
+        'Publish two 0600 firmware text files in a 0700 directory (default /tmp/ac86u-radio-nvram).' \
+        'Output must be a canonical /tmp descendant; traversal and symlink paths are rejected.' \
+        'DIR.owner records only version and output hashes. Owned valid output is reused.' \
+        'Compatible defaults to /sys/firmware/devicetree/base/compatible; other boards are a no-op.' \
+        'MTD inventory/device root default to /proc/mtd and /dev; paths must be absolute.' \
+        'Dry run validates without publishing. Preparation waits at most five seconds for a lock.'
+}
+
+safe_path() {
+    case "$1" in
+        /*) ;;
+        *) fail 'An absolute path is required' ;;
+    esac
+    case "$1" in
+        *[![:print:]]*) fail 'Control characters are not allowed in paths' ;;
+    esac
+    remaining=${1#/}
+    walked=
+    while [ -n "$remaining" ]; do
+        part=${remaining%%/*}
+        case "$part" in
+            ''|.|..) fail 'Empty or relative path components are not allowed' ;;
+        esac
+        walked=$walked/$part
+        [ ! -L "$walked" ] || fail 'Symlinked paths are not allowed'
+        case "$remaining" in
+            */*) remaining=${remaining#*/} ;;
+            *) remaining= ;;
+        esac
+    done
+}
+
+cleanup() {
+    result=$?
+    trap - 0 HUP INT TERM
+    set +e
+    if [ "$mounted" -eq 1 ]; then
+        if umount "$mount_dir"; then
+            mounted=0
+        else
+            printf '[ac86u-radio-nvram] Unmount failed; preserved mount at %s\n' "$mount_dir" >&2
+            result=1
+        fi
+    fi
+    if [ -n "$mount_dir" ] && [ "$mounted" -eq 0 ]; then
+        if ! rmdir "$mount_dir"; then
+            printf '[ac86u-radio-nvram] Could not remove mount directory %s\n' "$mount_dir" >&2
+            result=1
+        fi
+    fi
+    if [ -n "$stage" ]; then
+        rm -f -- "$stage/pair/${prefix}0.txt" "$stage/pair/${prefix}1.txt" "$stage/owner" "$stage/counts"
+        [ ! -d "$stage/pair" ] || rmdir "$stage/pair"
+        if ! rmdir "$stage"; then
+            printf '[ac86u-radio-nvram] Retained private staging directory %s\n' "$stage" >&2
+            result=1
+        fi
+    fi
+    if [ "$marker_owned" -eq 1 ] && [ "$published" -eq 0 ]; then
+        rm -f -- "$owner"
+    fi
+    if [ "$lock_owned" -eq 1 ]; then
+        rm -f -- "$lock/pid"
+        if ! rmdir "$lock"; then
+            printf '[ac86u-radio-nvram] Retained preparation lock %s\n' "$lock" >&2
+            result=1
+        fi
+    fi
+    if [ "$result" -ne 0 ]; then
+        printf '[ac86u-radio-nvram] Preparation failed (status %s); source preserved\n' "$result" >&2
+    fi
+    exit "$result"
+}
+
+verify_pair() {
+    if [ ! -d "$output" ] || [ -L "$output" ]; then
+        fail 'Existing output is not a private owned directory'
+    fi
+    if [ ! -f "$owner" ] || [ -L "$owner" ]; then
+        fail 'Existing output has no regular ownership record'
+    fi
+    [ "$(stat -c '%a:%u' "$output")" = "700:$uid" ] || fail 'Output directory ownership or mode differs'
+    [ "$(stat -c '%a:%u' "$owner")" = "600:$uid" ] || fail 'Ownership record ownership or mode differs'
+    [ "$(wc -l < "$owner")" -eq 3 ] || fail 'Invalid ownership record'
+    [ "$(wc -c < "$owner")" -le 160 ] || fail 'Invalid ownership record size'
+    for entry in "$output"/* "$output"/.[!.]* "$output"/..?*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        case "${entry##*/}" in
+            "${prefix}0.txt"|"${prefix}1.txt") ;;
+            *) fail 'Unexpected file in owned output; preserving it' ;;
+        esac
+    done
+    for radio in 0 1; do
+        file=$output/$prefix$radio.txt
+        if [ ! -f "$file" ] || [ -L "$file" ]; then
+            fail 'Owned firmware input is missing or symlinked'
+        fi
+        [ "$(stat -c '%a:%u' "$file")" = "600:$uid" ] || fail 'Owned firmware input ownership or mode differs'
+    done
+    first_hash=$(digest "$output/${prefix}0.txt") || fail 'Could not verify first firmware input digest'
+    second_hash=$(digest "$output/${prefix}1.txt") || fail 'Could not verify second firmware input digest'
+    expected=$(printf 'AC86U_RADIO_NVRAM_V1\n%s\n%s\n' "$first_hash" "$second_hash")
+    actual=$(cat "$owner")
+    [ "$actual" = "$expected" ] || fail 'Owned firmware input hashes differ; preserving output'
+}
+
+digest() {
+    checksum=$(sha256sum "$1") || fail 'Could not read firmware input for hashing'
+    checksum=${checksum%% *}
+    case "$checksum" in
+        ''|*[!0-9a-f]*) fail 'Invalid firmware digest result' ;;
+    esac
+    [ "${#checksum}" -eq 64 ] || fail 'Invalid firmware digest length'
+    printf '%s\n' "$checksum"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --help) usage; exit 0 ;;
+        --dry-run) dry_run=1; shift ;;
+        --source|--output-dir|--compatible|--mtd-proc|--device-root)
+            [ "$#" -ge 2 ] || fail 'A path option is missing its value'
+            case "$2" in --*|'') fail 'A path option is missing its value' ;; esac
+            case "$1" in
+                --source) source_file=$2 ;;
+                --output-dir) output=$2 ;;
+                --compatible) compatible=$2 ;;
+                --mtd-proc) mtd_proc=$2 ;;
+                --device-root) device_root=$2 ;;
+            esac
+            shift 2
+            ;;
+        *) fail 'Unknown option; use --help' ;;
+    esac
+done
+
+safe_path "$compatible"
+if [ ! -f "$compatible" ] || [ ! -r "$compatible" ]; then
+    fail 'Compatible property is not a readable regular file'
+fi
+board=$(tr '\000' '\n' < "$compatible") || fail 'Could not read compatible property'
+if ! printf '%s\n' "$board" | awk '$0 == "asus,rt-ac86u" {found=1} END {exit !found}'; then
+    exit 0
+fi
+safe_path "$output"
+case "$output" in
+    */) fail 'Output must not end in a slash' ;;
+    /tmp/?*) ;;
+    *) fail 'Output must be a canonical descendant of /tmp' ;;
+esac
+parent=${output%/*}
+[ -n "$parent" ] || parent=/
+[ -d "$parent" ] || fail 'Output parent does not exist'
+owner=$output.owner
+lock=$output.lock
+safe_path "$owner"
+safe_path "$lock"
+uid=$(id -u)
+trap cleanup 0
+trap 'fail "Interrupted before preparation completed"' HUP INT TERM
+attempt=0
+while ! mkdir "$lock" 2>/dev/null; do
+    if [ ! -d "$lock" ] || [ -L "$lock" ]; then
+        fail 'Preparation lock is not a regular directory'
+    fi
+    [ "$attempt" -lt 5 ] || fail 'Preparation busy after bounded wait; retry later'
+    attempt=$((attempt + 1))
+    sleep 1
+done
+lock_owned=1
+printf '%s\n' "$$" > "$lock/pid"
+if [ -e "$output" ] || [ -L "$output" ]; then
+    verify_pair
+    printf '[ac86u-radio-nvram] Existing owned radio pair verified; values withheld\n'
+    exit 0
+fi
+if [ -e "$owner" ] || [ -L "$owner" ]; then
+    fail 'Unmatched ownership record exists; preserving it'
+fi
+
+if [ -z "$source_file" ]; then
+    safe_path "$mtd_proc"
+    safe_path "$device_root"
+    if [ ! -f "$mtd_proc" ] || [ ! -r "$mtd_proc" ]; then
+        fail 'MTD inventory is not readable'
+    fi
+    [ -d "$device_root" ] || fail 'Device root is not a directory'
+    index=$(awk '
+        /^mtd[0-9]+:[ \t]+[0-9a-fA-F]+[ \t]+[0-9a-fA-F]+[ \t]+"data"[ \t]*$/ {
+            count++; device=$1; sub(/:$/, "", device)
+        }
+        END {if (count != 1) exit 1; sub(/^mtd/, "", device); print device}
+    ' "$mtd_proc") || fail 'Exactly one data MTD partition is required'
+    device=$device_root/mtdblock$index
+    safe_path "$device"
+    [ -b "$device" ] || [ -f "$device" ] || fail 'Data MTD block device is absent'
+    mount_dir=$(mktemp -d /tmp/ac86u-radio-nvram.mount.XXXXXX) || fail 'Could not create private mount directory'
+    chmod 700 "$mount_dir"
+    mount -t jffs2 -o ro,noatime "$device" "$mount_dir" || fail 'Read-only data mount failed'
+    mounted=1
+    source_file=$mount_dir/.kernel_nvram.setting
+fi
+safe_path "$source_file"
+if [ ! -f "$source_file" ] || [ ! -r "$source_file" ]; then
+    fail 'Source is not a readable regular file'
+fi
+size=$(wc -c < "$source_file") || fail 'Could not determine source size'
+if [ "$size" -le 0 ] || [ "$size" -gt 131072 ]; then
+    fail 'Source size must be within the 128-KiB store limit'
+fi
+source_hash=$(digest "$source_file") || fail 'Could not fingerprint source before reading'
+non_nul_size=$(tr -d '\000' < "$source_file" | wc -c)
+[ "$non_nul_size" -eq "$size" ] || fail 'Source contains NUL bytes or could not be read completely'
+stage=$(mktemp -d "$parent/.ac86u-radio-nvram.stage.XXXXXX") || fail 'Could not create private staging directory'
+mkdir "$stage/pair"
+AC86U_STAGE=$stage/pair AC86U_PREFIX=$prefix awk '
+function reject(reason) {
+    bad=1; printf "[ac86u-radio-nvram] %s at source line %d; values withheld\n", reason, NR > "/dev/stderr"; exit 1
+}
+function integer(value, result, i, digit) {
+    if (value ~ /^0[xX][0-9a-fA-F]+$/) {
+        value=tolower(substr(value,3)); result=0
+        for (i=1; i<=length(value); i++) {digit=index("0123456789abcdef",substr(value,i,1))-1; result=result*16+digit}
+        return result
+    }
+    if (value ~ /^[1-9][0-9]*$/ || value ~ /^0+$/) return value+0
+    return -1
+}
+function usable_mac(value, octets, i, first, joined) {
+    if (split(value,octets,":") != 6) return 0
+    joined=""
+    for (i=1; i<=6; i++) {if (octets[i] !~ /^[0-9a-fA-F][0-9a-fA-F]$/) return 0; joined=joined tolower(octets[i])}
+    first=integer("0x" octets[1]); return first%2==0 && joined!="000000000000"
+}
+{
+    line=$0; bytes+=length(line)+1; if (bytes>131073) reject("Source grew beyond size limit")
+    sub(/\r$/, "", line)
+    if (line ~ /^[0-9]+:/) {
+        section=line; sub(/:.*/, "", section)
+        if ("x" section != "x0" && "x" section != "x1") reject("Unexpected radio prefix")
+    }
+    if (substr(line,1,2)!="0:" && substr(line,1,2)!="1:") next
+    radio=substr(line,1,1)+0; payload=substr(line,3); equal=index(payload,"=")
+    if (!equal || payload ~ /[^ -~]/ || index(payload,"#")) reject("Malformed calibration row")
+    key=substr(payload,1,equal-1); value=substr(payload,equal+1)
+    if (key !~ /^[A-Za-z][A-Za-z0-9_]*$/) reject("Invalid calibration key")
+    if (tolower(key) ~ /password|passwd|secret|ssid|serial|private|token|credential|psk|wep/) reject("Sensitive-looking calibration key")
+    if ((radio SUBSEP key) in values) reject("Duplicate calibration key")
+    values[radio,key]=value; counts[radio]++; rows[radio]=rows[radio] payload "\n"
+    if (key ~ /^pa/) pa[radio]=1
+    if (key ~ /^maxp/) maxp[radio]=1
+}
+END {
+    if (bad) exit 1
+    for (radio=0; radio<2; radio++) {
+        if (integer(values[radio,"boardtype"]) != 1943+radio || integer(values[radio,"devid"]) != 17348+radio || integer(values[radio,"sromrev"]) != 13) reject("Missing or unexpected radio identity")
+        if (!usable_mac(values[radio,"macaddr"])) reject("Invalid factory MAC")
+        if (!((radio SUBSEP "boardflags") in values) || !pa[radio] || !maxp[radio]) reject("Missing calibration families")
+    }
+    if (tolower(values[0,"macaddr"]) == tolower(values[1,"macaddr"])) reject("Radio MACs must be distinct")
+    for (radio=0; radio<2; radio++) {
+        file=ENVIRON["AC86U_STAGE"] "/" ENVIRON["AC86U_PREFIX"] radio ".txt"
+        printf "%s", rows[radio] > file
+        if (close(file) != 0) reject("Calibration output write failed")
+    }
+    printf "Validated radio key counts: %d, %d; values withheld\n",counts[0],counts[1]
+}
+' "$source_file" > "$stage/counts" || fail 'Radio data validation or read failed'
+read_hash=$(digest "$source_file") || fail 'Could not fingerprint source after reading'
+[ "$read_hash" = "$source_hash" ] || fail 'Source changed during preparation; retry later'
+chmod 600 "$stage/pair/${prefix}0.txt" "$stage/pair/${prefix}1.txt"
+if [ "$mounted" -eq 1 ]; then
+    umount "$mount_dir" || fail 'Read-only data unmount failed'
+    mounted=0
+    rmdir "$mount_dir" || fail 'Could not remove temporary mount directory'
+    mount_dir=
+fi
+cat "$stage/counts"
+if [ "$dry_run" -eq 1 ]; then
+    printf '[ac86u-radio-nvram] Dry run validated; no outputs published\n'
+    exit 0
+fi
+first_hash=$(digest "$stage/pair/${prefix}0.txt") || fail 'Could not hash first staged firmware input'
+second_hash=$(digest "$stage/pair/${prefix}1.txt") || fail 'Could not hash second staged firmware input'
+printf 'AC86U_RADIO_NVRAM_V1\n%s\n%s\n' "$first_hash" "$second_hash" > "$stage/owner"
+ln "$stage/owner" "$owner" || fail 'Could not exclusively publish ownership record'
+marker_owned=1
+mv -n -T "$stage/pair" "$output" || fail 'Atomic radio-pair publication failed'
+[ ! -d "$stage/pair" ] || fail 'Output appeared concurrently; preserving it'
+published=1
+verify_pair
+printf '[ac86u-radio-nvram] Published private radio pair; values withheld\n'
+
+# <FILE>target/linux/bcm4908/base-files/usr/libexec/ac86u-radio-nvram</FILE> - <DESC>Validate preserved per-device radio settings and publish private RAM firmware inputs.</DESC>
+# <VERS>END OF VERSION: 0.1.1</VERS>

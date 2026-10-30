@@ -6,6 +6,7 @@ include $(INCLUDE_DIR)/image.mk
 DEVICE_VARS += ASUS_PRODUCTID ASUS_BUILD_NO ASUS_FW_REV ASUS_EXT_NO
 DEVICE_VARS += NETGEAR_BOARD_ID NETGEAR_REGION
 DEVICE_VARS += SOC
+DEVICE_VARS += CFERAM_FILE
 
 define Image/Prepare
 	cp bootfs*.its* $(KDIR)/
@@ -32,8 +33,8 @@ define Build/bcm4908img
 	mkdir -p $@-bootfs
 	cp -r $(DEVICE_NAME)/* $@-bootfs/
 	touch $@-bootfs/1-openwrt
-	cp $(DTS_DIR)/$(firstword $(DEVICE_DTS)).dtb $@-bootfs/94908.dtb
-	cp $(STAGING_DIR_IMAGE)/bcm63xx-cfe/$(subst _,$(comma),$(DEVICE_NAME))/cferam.000 $@-bootfs/
+	cp $(if $(DEVICE_DTS_DIR),$(KDIR)/image-$(notdir $(firstword $(DEVICE_DTS))).dtb,$(DTS_DIR)/$(firstword $(DEVICE_DTS)).dtb) $@-bootfs/94908.dtb
+	cp $(if $(CFERAM_FILE),$(CFERAM_FILE),$(STAGING_DIR_IMAGE)/bcm63xx-cfe/$(subst _,$(comma),$(DEVICE_NAME))/cferam.000) $@-bootfs/
 	cp $(IMAGE_KERNEL) $@-bootfs/vmlinux.lz
 
 	$(STAGING_DIR_HOST)/bin/mkfs.jffs2 --pad=0x800000 --little-endian --squash-uids \
@@ -62,6 +63,7 @@ define Build/pkgtb
 endef
 
 define Device/Default
+  CFERAM_FILE :=
   KERNEL := kernel-bin | bcm4908lzma | bcm4908kernel
   KERNEL_DEPENDS = $$(wildcard $(DTS_DIR)/$$(DEVICE_DTS).dts)
   KERNEL_INITRAMFS_SUFFIX := .bin
@@ -77,6 +79,8 @@ endef
 define Device/asus_gt-ac5300
   DEVICE_VENDOR := ASUS
   DEVICE_MODEL := GT-AC5300
+  # Shared BCM4908-family CFE: GT-AC5300 and BCM4906 RT-AC86U.
+  CFERAM_FILE := $(STAGING_DIR_IMAGE)/bcm63xx-cfe/asus,bcm4908-family/cferam.000
   DEVICE_DTS := broadcom/bcmbca/bcm4908-asus-gt-ac5300
   IMAGES := bin
   IMAGE/bin := append-ubi | bcm4908img | bcm4908asus
@@ -97,6 +101,25 @@ define Device/asus_gt-ax6000
 endef
 # TARGET_DEVICES += asus_gt-ax6000
 
+define Device/asus_rt-ac86u
+  DEVICE_VENDOR := ASUS
+  DEVICE_MODEL := RT-AC86U
+  # Shared BCM4908-family CFE: GT-AC5300 and BCM4906 RT-AC86U.
+  CFERAM_FILE := $(STAGING_DIR_IMAGE)/bcm63xx-cfe/asus,bcm4908-family/cferam.000
+  DEVICE_DTS_DIR := ../dts
+  DEVICE_DTS := bcm4906-asus-rt-ac86u
+  KERNEL_DEPENDS := ../dts/bcm4906-asus-rt-ac86u.dts $(KDIR)/image-bcm4906-asus-rt-ac86u.dtb
+  DEVICE_PACKAGES := tcpdump kmod-bcm4908-pcie kmod-brcmfmac brcmfmac-firmware-4366c0-pcie wpad-basic-mbedtls ucode ucode-mod-fs ucode-mod-rtnl ucode-mod-uci ucode-mod-uloop
+  IMAGES := bin
+  IMAGE_SIZE := 97280k
+  IMAGE/bin := append-ubi | bcm4908img | bcm4908asus | check-size
+  ASUS_PRODUCTID := RT-AC86U
+  ASUS_BUILD_NO := 386
+  ASUS_FW_REV := 3.0.0.4
+  ASUS_EXT_NO := 51967
+endef
+TARGET_DEVICES += asus_rt-ac86u
+
 define Device/netgear_r8000p
   DEVICE_VENDOR := Netgear
   DEVICE_MODEL := R8000P
@@ -115,7 +138,6 @@ define Device/tplink_archer-c2300-v1
   DEVICE_DTS := broadcom/bcmbca/bcm4906-tplink-archer-c2300-v1
   IMAGES := bin
   IMAGE/bin := append-ubi | bcm4908img
-  BROKEN := y
 endef
 TARGET_DEVICES += tplink_archer-c2300-v1
 

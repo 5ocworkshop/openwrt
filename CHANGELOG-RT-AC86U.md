@@ -1,13 +1,96 @@
 <!-- <FILE>CHANGELOG-RT-AC86U.md</FILE> - <DESC>Detailed AC86U fork change record.</DESC> -->
-<!-- <VERS>VERSION: 0.1.0</VERS> -->
-<!-- <WCTX>Keep detailed changes in one durable record while commit descriptions remain short.</WCTX> -->
-<!-- <CLOG>Record the environment setup seam separately from the hardware changes awaiting integration.</CLOG> -->
+<!-- <VERS>VERSION: 0.2.1</VERS> -->
+<!-- <WCTX>Record AC86U implementation details in boot order while retaining the environment setup seam.</WCTX> -->
+<!-- <CLOG>Record the shared CFE and hardware implementation with the combined regression results and explicit native ucode limit.</CLOG> -->
 
 # ASUS RT-AC86U changelog
 
 This personal fork starts from official OpenWrt25.12.6. Testing is limited to
 ASUS RT-AC86U hardware revision R1.5; other revisions and models are unverified.
 The experimental-use and warranty notice in README.md applies.
+
+## Hardware support — 2026-10-30
+
+### Image preparation and existing CFE loader
+
+* Keep the original OpenWrt bcm63xx-cfe source URL, pinned revision and archive
+  checksum. Prepare the shared loader path from the binary already supplied by
+  that package; no private repository URL or replacement vendor blob is needed.
+* Move the existing `asus,gt-ac5300/cferam.000` payload to
+  `asus,bcm4908-family/cferam.000` during package preparation and leave the old
+  path as a relative compatibility symlink. Both GT-AC5300 and RT-AC86U profiles
+  explicitly select the shared path; removing the old alias leaves the shared
+  payload intact.
+* Preserve the355,110-byte payload exactly, SHA256
+  `14ff148b6a183ddd76f7fea362672eb2af486b0a9be1d20cfdb7b9a9acbf1824`.
+  This packaging change neither recompiles CFE nor changes its compiled board
+  tables. The existing payload includes the94906REF descriptor used by AC86U.
+* Add the RT-AC86U board description, memory and flash geometry, physical port
+  mappings, peripheral connections, ASUS image identifiers and upgrade handling.
+
+### Kernel initialization, storage and peripheral power
+
+* Correct CFE NAND partition parsing so an intentionally skipped backup partition
+  is accepted instead of being reported as an error.
+* Add the GPIO mux function used by the AC86U USB power-enable path. USB power is
+  independent of status LED control; this does not configure mounts or extroot.
+* Retain the wired LED controller changes and staged boot feedback that expose
+  kernel, storage/root-mount and userspace progress without a serial console.
+  Preserve the standard power-LED boot/failsafe/running/upgrade aliases and hand
+  the diagnostic channels back to normal LED policy after startup.
+
+### PCIe and radio initialization
+
+* Retain the tested legacy INTx controls, host-window prerequisites and register
+  observations used during radio bring-up.
+* Apply the AC86U-scoped vendor-style BAR/inbound-RAM-window, remapping, interrupt
+  and spread-spectrum-clock compatibility profile. Keep this behavior scoped to
+  the supported board.
+* Copy firmware-loader-owned radio NVRAM before country-code filtering. The
+  loader can supply read-only memory; modifying that buffer caused the earlier
+  kernel write fault. Preserve the filtering behavior without modifying its input.
+* Correct procd's failed, empty and incomplete firmware transactions, including
+  interrupted and partial I/O, so unsuccessful transfers are explicitly aborted.
+* Read each unit's preserved factory radio data read-only and publish validated
+  radio configuration in RAM. Firmware images contain generic links and helpers,
+  never another unit's calibration or MAC addresses.
+* Select stock OpenWrt radio firmware and brcmfmac packages, load the PCIe host
+  before the radio driver, and retain normal automatic probing on other boards.
+* Bound startup observation and additional binds for expected unbound radios,
+  using limited retries/backoff and an overall deadline. This startup policy does
+  not establish recovery from every runtime radio failure.
+
+### Normal indicators and runtime prerequisites
+
+* Update wireless LED activation/deactivation handling and restore the tested
+  firmware LED pattern/duty when enabled. These LEDs belong to radio firmware,
+  separate from the board's wired LED controller.
+* Implement carrier-first WAN indication: no carrier means off; carrier with an
+  installed main-table default route selects white link/activity; carrier without
+  a default route selects red. Reconcile link/route events and startup handoff
+  while preserving user LED overrides; no Internet reachability probe is used.
+* Enable existing BusyBox defaults for `timeout`, `stat`, formatted stat output
+  and **fractional-second sleep**, such as `sleep 0.1`. Existing basic/fancy sleep
+  defaults remain enabled and explicit custom feature choices remain respected.
+
+### Qualification limits
+
+The combined fork Python suite passed132 tests with the verified published CFE
+archive and an explicit pre-871 driver baseline. This includes the native compiled
+read-only-buffer/cleanup regression, per-unit data preparation, startup recovery,
+WAN policy simulation, wired LEDs and boot handoff/hooks. The separate native
+ucode test remains unverified because its host interpreter/development dependencies
+were unavailable; no host dependencies were installed for this change.
+
+Earlier release-based images booted on RT-AC86U R1.5 with this stock CFE payload.
+Local development tests demonstrated Samsung connectivity on both bands and
+Lenovo connectivity on5GHz. The Lenovo2.4GHz PSM-watchdog/DHCP problem also occurred
+with the original ASUS/Merlin CFE and is deferred. Antenna-free performance
+observations are preliminary; other board revisions/models are unverified.
+
+A new firmware built from this exact fork implementation commit still requires
+the user's flash and hardware acceptance test. Private iPXE/nextboot work,
+credentials, personal network policy and inactive experiments are excluded.
 
 ## Environment setup — 2026-10-30
 
@@ -38,7 +121,8 @@ The experimental-use and warranty notice in README.md applies.
   preserving the upstream license and documentation.
 
 The hardware patch set, shared-CFE package mapping and BusyBox feature defaults
-are a subsequent implementation seam and are not claimed as landed by this entry.
+belong to the subsequent implementation entry above; the environment commit
+itself introduced none of those hardware changes.
 
 <!-- <FILE>CHANGELOG-RT-AC86U.md</FILE> - <DESC>Detailed AC86U fork change record.</DESC> -->
-<!-- <VERS>END OF VERSION: 0.1.0</VERS> -->
+<!-- <VERS>END OF VERSION: 0.2.1</VERS> -->

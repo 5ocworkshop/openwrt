@@ -1,0 +1,67 @@
+#!/bin/sh
+# <FILE>target/linux/bcm4908/base-files/etc/uci-defaults/90-rt-ac86u-leds</FILE> - <DESC>Provision missing RT-AC86U wired netdev LED settings without replacing user choices.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Apply link and CPU-visible activity indications on fresh boot and retained-settings upgrades.</WCTX>
+# <CLOG>Create five standard LED entries idempotently and preserve existing configurations for each indicator.</CLOG>
+
+case "${1:-}" in
+--help)
+	printf '%s\n' 'RT-AC86U boot defaults: add missing system LED netdev entries and commit only changes.' \
+		'No arguments; RTAC86U_LIBDIR defaults to /lib (runtime libraries; test override).'
+	exit 0
+	;;
+esac
+
+# OpenWrt libraries use optional unset globals; avoid set -u while using their API.
+set -e
+status=0
+trap 'status=$?; if [ "$status" -ne 0 ]; then printf "[rt-ac86u-leds] failed (%s)\n" "$status" >&2; logger -t rt-ac86u-leds "provisioning failed ($status)" || :; fi' EXIT
+
+RTAC86U_LIBDIR="${RTAC86U_LIBDIR:-/lib}"
+case "$RTAC86U_LIBDIR" in /*) ;; *) printf '[rt-ac86u-leds] invalid library path\n' >&2; exit 2 ;; esac
+# Runtime OpenWrt libraries are replaced by API-compatible fixtures in host tests.
+# shellcheck source=/dev/null
+. "$RTAC86U_LIBDIR/functions.sh"
+# shellcheck source=/dev/null
+. "$RTAC86U_LIBDIR/functions/system.sh"
+[ "$(board_name)" = 'asus,rt-ac86u' ] || exit 0
+
+# OpenWrt invokes this callback by name through config_foreach.
+# shellcheck disable=SC2317
+rtac86u_led_exists() {
+	configured_sysfs=''
+	config_get configured_sysfs "$1" sysfs
+	[ "$configured_sysfs" != "$wanted_sysfs" ] || led_found=1
+	return 0
+}
+
+config_load system
+missing_leds=''
+for device in lan1 lan2 lan3 lan4 wan; do
+	wanted_sysfs="$device"
+	led_found=0
+	config_foreach rtac86u_led_exists led
+	[ "$led_found" -eq 0 ] || continue
+	section="rtac86u_$device"
+	if uci -q get "system.$section" >/dev/null; then
+		printf '[rt-ac86u-leds] existing section conflicts with %s\n' "$section" >&2
+		exit 1
+	fi
+	missing_leds="$missing_leds $device"
+done
+
+for device in $missing_leds; do
+	section="rtac86u_$device"
+	case "$device" in wan) title='WAN' ;; *) title="LAN${device#lan}" ;; esac
+	uci set "system.$section=led"
+	uci set "system.$section.name=$title"
+	uci set "system.$section.sysfs=$device"
+	uci set "system.$section.trigger=netdev"
+	uci set "system.$section.dev=$device"
+	uci set "system.$section.mode=link tx rx"
+done
+[ -z "$missing_leds" ] || uci commit system
+exit 0
+
+# <FILE>target/linux/bcm4908/base-files/etc/uci-defaults/90-rt-ac86u-leds</FILE> - <DESC>Provision missing RT-AC86U wired netdev LED settings without replacing user choices.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>

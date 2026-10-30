@@ -1,0 +1,40 @@
+#!/bin/sh /etc/rc.common
+# <FILE>target/linux/bcm4908/base-files/etc/init.d/ac86u-wan-led</FILE> - <DESC>Supervise event-driven AC86U WAN indicator policy.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Start normal carrier/route observation without blocking boot diagnostics.</WCTX>
+# <CLOG>Register one bounded-respawn ucode monitor before the final boot handoff.</CLOG>
+
+export START=97 STOP=01 USE_PROCD=1
+
+start_service() {
+    ac86u_wan_board_file="${AC86U_WAN_LED_BOARD_FILE:-/tmp/sysinfo/board_name}"
+    [ -r "$ac86u_wan_board_file" ] || return 0
+    read -r ac86u_wan_board < "$ac86u_wan_board_file"
+    [ "$ac86u_wan_board" = 'asus,rt-ac86u' ] || return 0
+    ac86u_wan_helper="${AC86U_WAN_LED_HELPER:-/usr/libexec/ac86u-wan-led}"
+    [ -x "$ac86u_wan_helper" ] || { echo '[ac86u-wan-led] Missing executable helper' >&2; return 1; }
+    procd_open_instance
+    procd_set_param command "$ac86u_wan_helper" --watch
+    procd_set_param env \
+        "AC86U_WAN_LED_LIBDIR=${AC86U_WAN_LED_LIBDIR:-}" \
+        "AC86U_WAN_LED_UCODE=${AC86U_WAN_LED_UCODE:-}" \
+        "AC86U_WAN_LED_SYSFS=${AC86U_WAN_LED_SYSFS:-}" \
+        "AC86U_WAN_LED_BOARD_FILE=$ac86u_wan_board_file" \
+        "AC86U_WAN_LED_BOOT_STATUS=${AC86U_WAN_LED_BOOT_STATUS:-}" \
+        "AC86U_WAN_LED_LOCK=${AC86U_WAN_LED_LOCK:-}" \
+        "AC86U_WAN_LED_STATUS=${AC86U_WAN_LED_STATUS:-}" \
+        "AC86U_WAN_LED_CONFIG_DIR=${AC86U_WAN_LED_CONFIG_DIR:-}"
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param file /etc/config/system /etc/config/network
+    procd_set_param respawn 3600 5 5
+    procd_set_param term_timeout 10
+    procd_close_instance
+}
+
+service_triggers() {
+    procd_add_reload_trigger system network
+}
+
+# <FILE>target/linux/bcm4908/base-files/etc/init.d/ac86u-wan-led</FILE> - <DESC>Supervise event-driven AC86U WAN indicator policy.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>

@@ -1,0 +1,39 @@
+#!/bin/sh
+# <FILE>target/linux/bcm4908/base-files/usr/libexec/ac86u-wan-led</FILE> - <DESC>Launch the shared board-scoped WAN LED reconciler or event monitor.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Provide one explicit entrypoint for normal network events and boot handoff.</WCTX>
+# <CLOG>Expose once/watch/dry-run modes using existing ucode and configurable fixture-safe paths.</CLOG>
+
+set -eu
+ac86u_wan_rc=0
+trap 'ac86u_wan_rc=$?; if [ "$ac86u_wan_rc" -ne 0 ]; then echo "[ac86u-wan-led] FAILED rc=$ac86u_wan_rc" >&2; fi; exit "$ac86u_wan_rc"' EXIT
+
+usage() {
+    printf '%s\n' 'Usage: ac86u-wan-led [--once|--watch|--dry-run|--help]' \
+        'Reconcile physical WAN carrier and installed main-table default routes.' \
+        '--once (default): apply current policy; --watch: react to link/route events.' \
+        '--dry-run: read and report current policy without LED/status/lock writes.' \
+        'AC86U_WAN_LED_LIBDIR defaults to /usr/share/ac86u; AC86U_WAN_LED_UCODE to /usr/bin/ucode.' \
+        'AC86U_WAN_LED_{SYSFS,BOARD_FILE,BOOT_STATUS,LOCK,STATUS,CONFIG_DIR} override local paths.'
+}
+
+[ "$#" -le 1 ] || { usage >&2; exit 2; }
+case "${1:---once}" in
+    --help) usage; exit 0 ;;
+    --once) AC86U_WAN_LED_MODE=once ;;
+    --watch) AC86U_WAN_LED_MODE=watch ;;
+    --dry-run) AC86U_WAN_LED_MODE=dry-run ;;
+    *) usage >&2; exit 2 ;;
+esac
+libdir="${AC86U_WAN_LED_LIBDIR:-/usr/share/ac86u}"
+interpreter="${AC86U_WAN_LED_UCODE:-/usr/bin/ucode}"
+case "$libdir:$interpreter" in /*:/*) ;; *) echo 'WAN policy paths must be absolute' >&2; exit 2 ;; esac
+if [ ! -x "$interpreter" ] || [ ! -r "$libdir/orc_wan_led_monitor.uc" ]; then
+    echo 'WAN policy interpreter/modules unavailable' >&2
+    exit 1
+fi
+export AC86U_WAN_LED_MODE
+exec "$interpreter" -L "$libdir" "$libdir/orc_wan_led_monitor.uc"
+
+# <FILE>target/linux/bcm4908/base-files/usr/libexec/ac86u-wan-led</FILE> - <DESC>Launch the shared board-scoped WAN LED reconciler or event monitor.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>

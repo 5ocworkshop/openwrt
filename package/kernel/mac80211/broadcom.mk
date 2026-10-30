@@ -1,3 +1,6 @@
+-include $(TOPDIR)/target/linux/bcm4908/ac86u-wireless-stable.mk
+PKG_FILE_DEPENDS += $(wildcard $(TOPDIR)/target/linux/bcm4908/ac86u-wireless-stable.mk)
+
 PKG_DRIVERS += \
 	b43 brcmsmac brcmfmac brcmutil
 
@@ -425,6 +428,11 @@ endef
 
 define KernelPackage/brcmfmac/description
  Kernel module for Broadcom IEEE802.11n USB Wireless cards
+endef
+
+# Preserve normal probing on other boards; order the selected AC86U profile.
+define KernelPackage/brcmfmac/bcm4908
+  AUTOLOAD:=$(if $(AC86U_WIRELESS_STABLE),$(call AutoLoad,61,brcmfmac),$(call AutoProbe,brcmfmac))
 endef
 
 define KernelPackage/brcmfmac/config

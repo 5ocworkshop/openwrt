@@ -1,0 +1,67 @@
+# <FILE>target/linux/bcm4908/patches-6.12/411-bcm4908-usb-vbus-gpio-mux.patch</FILE> - <DESC>Add the BCM4908 pad-three GPIO mux for independent USB VBUS power.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Keep USB storage powered independently of router LED brightness controls.</WCTX>
+# <CLOG>Add an opt-in pad3/mux4 function and its binding without changing existing LED muxes.</CLOG>
+#
+# Linux 6.12 only. The RT-AC86U GPIO provider selects this state before
+# registering an active-low output-high GPIO hog. Other boards are unchanged.
+# Vendor 94906REF uses physical pad3 for VBUS; normal GPIO mode is mux4.
+#
+--- a/drivers/pinctrl/bcm/pinctrl-bcm4908.c
++++ b/drivers/pinctrl/bcm/pinctrl-bcm4908.c
+@@ -41,6 +41,11 @@
+ 	unsigned int function;
+ };
+ 
++/* Pad 3 can drive board power independently of the LED controller. */
++static const struct bcm4908_pinctrl_pin_setup gpio_3_pins[] = {
++	{ 3, 4 },
++};
++
+ static const struct bcm4908_pinctrl_pin_setup led_0_pins_a[] = {
+ 	{ 0, 3 },
+ };
+@@ -256,6 +261,7 @@
+ };
+ 
+ static const struct bcm4908_pinctrl_grp bcm4908_pinctrl_grps[] = {
++	{ "gpio_3_grp", gpio_3_pins, ARRAY_SIZE(gpio_3_pins) },
+ 	{ "led_0_grp_a", led_0_pins_a, ARRAY_SIZE(led_0_pins_a) },
+ 	{ "led_1_grp_a", led_1_pins_a, ARRAY_SIZE(led_1_pins_a) },
+ 	{ "led_2_grp_a", led_2_pins_a, ARRAY_SIZE(led_2_pins_a) },
+@@ -352,10 +358,12 @@
+ static const char * const nand_ctrl_groups[] = { "nand_ctrl_grp" };
+ static const char * const nand_data_groups[] = { "nand_data_grp" };
+ static const char * const emmc_ctrl_groups[] = { "emmc_ctrl_grp" };
++static const char * const gpio_3_groups[] = { "gpio_3_grp" };
+ static const char * const usb0_pwr_groups[] = { "usb0_pwr_grp" };
+ static const char * const usb1_pwr_groups[] = { "usb1_pwr_grp" };
+ 
+ static const struct bcm4908_pinctrl_function bcm4908_pinctrl_functions[] = {
++	{ "gpio_3", gpio_3_groups, ARRAY_SIZE(gpio_3_groups) },
+ 	{ "led_0", led_0_groups, ARRAY_SIZE(led_0_groups) },
+ 	{ "led_1", led_1_groups, ARRAY_SIZE(led_1_groups) },
+ 	{ "led_2", led_2_groups, ARRAY_SIZE(led_2_groups) },
+--- a/Documentation/devicetree/bindings/pinctrl/brcm,bcm4908-pinctrl.yaml
++++ b/Documentation/devicetree/bindings/pinctrl/brcm,bcm4908-pinctrl.yaml
+@@ -32,7 +32,7 @@
+                 led_17, led_18, led_19, led_20, led_21, led_22, led_23, led_24,
+                 led_25, led_26, led_27, led_28, led_29, led_30, led_31,
+                 hs_uart, i2c, i2s, nand_ctrl, nand_data, emmc_ctrl, usb0_pwr,
+-                usb1_pwr ]
++                usb1_pwr, gpio_3 ]
+ 
+       groups:
+         minItems: 1
+@@ -49,7 +49,7 @@
+                   led_28_grp_a, led_29_grp_a, led_30_grp_a, led_31_grp_a,
+                   led_31_grp_b, hs_uart_grp, i2c_grp_a, i2c_grp_b, i2s_grp,
+                   nand_ctrl_grp, nand_data_grp, emmc_ctrl_grp, usb0_pwr_grp,
+-                  usb1_pwr_grp ]
++                  usb1_pwr_grp, gpio_3_grp ]
+ 
+ allOf:
+   - $ref: pinctrl.yaml#
+
+# <FILE>target/linux/bcm4908/patches-6.12/411-bcm4908-usb-vbus-gpio-mux.patch</FILE> - <DESC>Add the BCM4908 pad-three GPIO mux for independent USB VBUS power.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>

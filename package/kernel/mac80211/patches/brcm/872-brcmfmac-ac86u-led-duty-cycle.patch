@@ -1,0 +1,168 @@
+# <FILE>package/kernel/mac80211/patches/brcm/872-brcmfmac-ac86u-led-duty-cycle.patch</FILE> - <DESC>Align RT-AC86U WLAN indicators with completed network-interface transitions.</DESC>
+# <VERS>VERSION: 0.2.0</VERS>
+# <WCTX>Keep disabled RT-AC86U radios dark and restore their normal full-duty indicators when enabled.</WCTX>
+# <CLOG>Explicitly set LED behavior after preinit, successful open/AP start and final data-interface shutdown while preserving polarity and radio results.</CLOG>
+
+Subject: [PATCH] brcmfmac: reconcile RT-AC86U WLAN indicators on interface changes
+
+The firmware's normal LED behavior can remain active after an AP is stopped.
+Keep the two existing RT-AC86U board types dark at firmware initialization and
+after their last data interface closes. Restore the factory behavior and the
+observed full-duty value after successful open and AP setup. Preserve the
+firmware polarity and report LED errors without changing networking results.
+
+Only the stop path scans registered netdevs, under RTNL. Exclude its current
+interface because ndo_stop precedes clearing IFF_UP; another active data
+interface on that wiphy keeps its indicator on. Do not walk driver iflist
+entries across their separate unregister/free and pointer-clear lifetime.
+
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c
+@@ -6,6 +6,8 @@
+ #include <linux/kernel.h>
+ #include <linux/string.h>
+ #include <linux/netdevice.h>
++#include <linux/rtnetlink.h>
++#include <net/cfg80211.h>
+ #include <linux/module.h>
+ #include <linux/firmware.h>
+ #include <brcmu_wifi.h>
+@@ -263,6 +265,88 @@
+ 	err = brcmf_c_download_blob(ifp, settings->cal_blob, settings->cal_size,
+ 				    "calload", "calload_status");
+ 	return err;
++}
++
++static bool brcmf_c_is_ac86u(struct brcmf_if *ifp)
++{
++	const char *board_type = ifp->drvr->settings->board_type;
++
++	return board_type &&
++	       (!strcmp(board_type, "asus,rt-ac86u-radio0") ||
++		!strcmp(board_type, "asus,rt-ac86u-radio1"));
++}
++
++void brcmf_c_set_ac86u_led(struct brcmf_if *ifp, bool enabled)
++{
++	struct {
++		__le32 index;
++		__le32 behavior;
++		u8 activehi;
++		u8 pad[3];
++	} led = { .index = cpu_to_le32(9) };
++	int err;
++
++	if (!brcmf_c_is_ac86u(ifp))
++		return;
++
++	err = brcmf_fil_iovar_data_get(ifp, "ledbh", &led, sizeof(led));
++	if (err) {
++		dev_warn(ifp->drvr->bus_if->dev,
++			 "failed to read RT-AC86U LED state: %d\n", err);
++		return;
++	}
++	if (le32_to_cpu(led.index) != 9) {
++		dev_warn(ifp->drvr->bus_if->dev,
++			 "unexpected RT-AC86U LED index: %u\n",
++			 le32_to_cpu(led.index));
++		return;
++	}
++
++	if (enabled) {
++		err = brcmf_fil_iovar_int_set(ifp, "leddc", 0x000a0000);
++		if (err)
++			dev_warn(ifp->drvr->bus_if->dev,
++				 "failed to set RT-AC86U LED duty cycle: %d\n",
++				 err);
++	}
++
++	led.behavior = cpu_to_le32(enabled ? 7 : 0);
++	memset(led.pad, 0, sizeof(led.pad));
++	err = brcmf_fil_iovar_data_set(ifp, "ledbh", &led, sizeof(led));
++	if (err)
++		dev_warn(ifp->drvr->bus_if->dev,
++			 "failed to set RT-AC86U LED behavior: %d\n", err);
++}
++
++void brcmf_c_stop_ac86u_led(struct brcmf_if *ifp)
++{
++	struct net_device *ndev;
++	struct wireless_dev *wdev;
++
++	if (!brcmf_c_is_ac86u(ifp) || !ifp->ndev)
++		return;
++
++	/* ndo_stop precedes clearing IFF_UP on the closing interface. */
++	ASSERT_RTNL();
++	for_each_netdev(dev_net(ifp->ndev), ndev) {
++		if (ndev == ifp->ndev || !(ndev->flags & IFF_UP))
++			continue;
++		wdev = ndev->ieee80211_ptr;
++		if (!wdev || wdev->wiphy != ifp->drvr->wiphy)
++			continue;
++		switch (wdev->iftype) {
++		case NL80211_IFTYPE_ADHOC:
++		case NL80211_IFTYPE_STATION:
++		case NL80211_IFTYPE_AP:
++		case NL80211_IFTYPE_P2P_CLIENT:
++		case NL80211_IFTYPE_P2P_GO:
++			brcmf_c_set_ac86u_led(ifp, true);
++			return;
++		default:
++			break;
++		}
++	}
++	brcmf_c_set_ac86u_led(ifp, false);
+ }
+ 
+ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
+@@ -492,6 +576,7 @@
+ 
+ 	/* Enable tx beamforming, errors can be ignored (not supported) */
+ 	(void)brcmf_fil_iovar_int_set(ifp, "txbf", 1);
++	brcmf_c_set_ac86u_led(ifp, false);
+ done:
+ 	return err;
+ }
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.h
+@@ -70,6 +70,8 @@
+ 
+ /* Sets dongle media info (drv_version, mac address). */
+ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp);
++void brcmf_c_set_ac86u_led(struct brcmf_if *ifp, bool enabled);
++void brcmf_c_stop_ac86u_led(struct brcmf_if *ifp);
+ int brcmf_c_set_cur_etheraddr(struct brcmf_if *ifp, const u8 *addr);
+ 
+ #ifdef CONFIG_DMI
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -5394,6 +5394,7 @@
+ 	brcmf_config_ap_mgmt_ie(ifp->vif, &settings->beacon);
+ 	set_bit(BRCMF_VIF_STATUS_AP_CREATED, &ifp->vif->sme_state);
+ 	brcmf_net_setcarrier(ifp, true);
++	brcmf_c_set_ac86u_led(ifp, true);
+ 
+ exit:
+ 	if ((err) && (!mbss)) {
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.c
+@@ -596,6 +596,7 @@
+ 	brcmf_cfg80211_down(ndev);
+ 
+ 	brcmf_net_setcarrier(ifp, false);
++	brcmf_c_stop_ac86u_led(ifp);
+ 
+ 	return 0;
+ }
+@@ -631,6 +632,7 @@
+ 
+ 	/* Clear, carrier, set when connected or AP mode. */
+ 	netif_carrier_off(ndev);
++	brcmf_c_set_ac86u_led(ifp, true);
+ 	return 0;
+ }
+ 
+
+# <FILE>package/kernel/mac80211/patches/brcm/872-brcmfmac-ac86u-led-duty-cycle.patch</FILE> - <DESC>Align RT-AC86U WLAN indicators with completed network-interface transitions.</DESC>
+# <VERS>END OF VERSION: 0.2.0</VERS>

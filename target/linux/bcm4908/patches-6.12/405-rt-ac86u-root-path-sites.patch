@@ -1,0 +1,643 @@
+# <FILE>target/linux/bcm4908/patches-6.12/405-rt-ac86u-root-path-sites.patch</FILE> - <DESC>Board-scoped boot waypoint core and precise root mount failure observations.</DESC>
+# <VERS>VERSION: 0.1.2</VERS>
+# <WCTX>Separate four-zone boot facts and root-task error provenance from the LED renderer.</WCTX>
+# <CLOG>Add core-atomic startup finalization that requires prior preinit success and preserves failure facts.</CLOG>
+
+--- a/drivers/leds/blink/Makefile
++++ b/drivers/leds/blink/Makefile
+@@ -1,3 +1,4 @@
+ # SPDX-License-Identifier: GPL-2.0
+ obj-$(CONFIG_LEDS_BCM63138)	+= leds-bcm63138.o
++obj-$(CONFIG_LEDS_BCM63138)	+= rtac86u-bootwaypoints.o
+ obj-$(CONFIG_LEDS_LGM)	+= leds-lgm-sso.o
+--- a/init/do_mounts.c
++++ b/init/do_mounts.c
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ #include <linux/module.h>
++#include <linux/rtac86u_bootwaypoints.h>
+ #include <linux/rtac86u_bootdiag.h>
+ #include <linux/sched.h>
+ #include <linux/ctype.h>
+@@ -156,6 +157,7 @@
+ 	unsigned int stage = fs && !strcmp(fs, "ubifs") ? 12 :
+ 			     fs && !strcmp(fs, "squashfs") ? 14 : 13;
+ 
++	rtac86u_wp_event(RTAC86U_WP_MOUNT_BEGIN, ROOT_DEV, 0);
+ 	rtac86u_rootdiag_checkpoint(stage, 0);
+ 
+ 	if (data) {
+@@ -186,6 +188,7 @@
+ 	if (p)
+ 		put_page(p);
+ 	rtac86u_rootdiag_checkpoint(stage, ret ? 2 : 1);
++	rtac86u_wp_event(RTAC86U_WP_MOUNT_END, 0, ret);
+ 	return ret;
+ }
+ 
+@@ -412,6 +415,8 @@
+ {
+ 	int err = create_dev("/dev/root", ROOT_DEV);
+ 
++	rtac86u_wp_event(RTAC86U_WP_ROOT_NODE, ROOT_DEV, err);
++
+ 	if (err < 0)
+ 		pr_emerg("Failed to create /dev/root: %d\n", err);
+ 	mount_root_generic("/dev/root", root_device_name, root_mountflags);
+@@ -424,6 +429,7 @@
+ 
+ void __init mount_root(char *root_device_name)
+ {
++	rtac86u_wp_event(RTAC86U_WP_ROOT_SELECTED, ROOT_DEV, 0);
+ 	rtac86u_rootdiag_checkpoint(ROOT_DEV ? 10 : 11, 0);
+ #ifdef CONFIG_MTD_ROOTFS_ROOT_DEV
+ 	if (!mount_ubi_rootfs())
+--- a/fs/init.c
++++ b/fs/init.c
+@@ -4,6 +4,7 @@
+  * descriptors.  Only for init/ and related early init code.
+  */
+ #include <linux/init.h>
++#include <linux/rtac86u_bootwaypoints.h>
+ #include <linux/mount.h>
+ #include <linux/namei.h>
+ #include <linux/fs.h>
+@@ -20,6 +21,7 @@
+ 	int ret;
+ 
+ 	ret = kern_path(dir_name, LOOKUP_FOLLOW, &path);
++	rtac86u_wp_event(RTAC86U_WP_TARGET_LOOKUP, 0, ret);
+ 	if (ret)
+ 		return ret;
+ 	ret = path_mount(dev_name, &path, type_page, flags, data_page);
+--- a/block/bdev.c
++++ b/block/bdev.c
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include <linux/init.h>
++#include <linux/rtac86u_bootwaypoints.h>
+ #include <linux/mm.h>
+ #include <linux/slab.h>
+ #include <linux/kmod.h>
+@@ -915,19 +916,26 @@
+ 
+ 	mutex_lock(&disk->open_mutex);
+ 	ret = -ENXIO;
+-	if (!disk_live(disk))
++	if (!disk_live(disk)) {
++		rtac86u_wp_event(RTAC86U_WP_DISK_NOT_LIVE, bdev->bd_dev, ret);
+ 		goto abort_claiming;
+-	if (!try_module_get(disk->fops->owner))
++	}
++	if (!try_module_get(disk->fops->owner)) {
++		rtac86u_wp_event(RTAC86U_WP_DISK_NOT_LIVE, bdev->bd_dev, ret);
+ 		goto abort_claiming;
++	}
+ 	ret = -EBUSY;
+ 	if (!bdev_may_open(bdev, mode))
+ 		goto put_module;
++	rtac86u_wp_event(RTAC86U_WP_DRIVER_OPEN, bdev->bd_dev, 0);
+ 	if (bdev_is_partition(bdev))
+ 		ret = blkdev_get_part(bdev, mode);
+ 	else
+ 		ret = blkdev_get_whole(bdev, mode);
+-	if (ret)
++	if (ret) {
++		rtac86u_wp_event(RTAC86U_WP_DRIVER_OPEN, bdev->bd_dev, ret);
+ 		goto put_module;
++	}
+ 	bdev_claim_write_access(bdev, mode);
+ 	if (holder) {
+ 		bd_finish_claiming(bdev, holder, hops);
+@@ -1015,8 +1023,11 @@
+ 		return ERR_PTR(ret);
+ 
+ 	bdev = blkdev_get_no_open(dev);
+-	if (!bdev)
++	if (!bdev) {
++		rtac86u_wp_event(RTAC86U_WP_BDEV_MISSING, dev, -ENXIO);
+ 		return ERR_PTR(-ENXIO);
++	}
++	rtac86u_wp_event(RTAC86U_WP_BDEV_READY, dev, 0);
+ 
+ 	flags = blk_to_file_flags(mode);
+ 	bdev_file = alloc_file_pseudo_noaccount(BD_INODE(bdev),
+@@ -1174,19 +1185,26 @@
+ 		return -EINVAL;
+ 
+ 	error = kern_path(pathname, LOOKUP_FOLLOW, &path);
+-	if (error)
++	if (error) {
++		rtac86u_wp_event(RTAC86U_WP_SOURCE_LOOKUP, 0, error);
+ 		return error;
++	}
+ 
+ 	inode = d_backing_inode(path.dentry);
+ 	error = -ENOTBLK;
+-	if (!S_ISBLK(inode->i_mode))
++	if (!S_ISBLK(inode->i_mode)) {
++		rtac86u_wp_event(RTAC86U_WP_SOURCE_INVALID, 0, error);
+ 		goto out_path_put;
++	}
+ 	error = -EACCES;
+-	if (!may_open_dev(&path))
++	if (!may_open_dev(&path)) {
++		rtac86u_wp_event(RTAC86U_WP_SOURCE_INVALID, 0, error);
+ 		goto out_path_put;
++	}
+ 
+ 	*dev = inode->i_rdev;
+ 	error = 0;
++	rtac86u_wp_event(RTAC86U_WP_SOURCE_LOOKUP, *dev, 0);
+ out_path_put:
+ 	path_put(&path);
+ 	return error;
+--- a/drivers/mtd/ubi/block.c
++++ b/drivers/mtd/ubi/block.c
+@@ -28,6 +28,7 @@
+  */
+ 
+ #include <linux/module.h>
++#include <linux/rtac86u_bootwaypoints.h>
+ #include <linux/init.h>
+ #include <linux/err.h>
+ #include <linux/kernel.h>
+@@ -256,6 +257,7 @@
+ 		dev_err(disk_to_dev(dev->gd), "failed to open ubi volume %d_%d",
+ 			dev->ubi_num, dev->vol_id);
+ 		ret = PTR_ERR(dev->desc);
++		rtac86u_wp_event(RTAC86U_WP_UBI_OPEN, disk_devt(disk), ret);
+ 		dev->desc = NULL;
+ 		goto out_unlock;
+ 	}
+@@ -347,7 +349,7 @@
+ 	return 0;
+ }
+ 
+-int ubiblock_create(struct ubi_volume_info *vi)
++static int ubiblock_create_without_waypoints(struct ubi_volume_info *vi)
+ {
+ 	struct queue_limits lim = {
+ 		.max_segments		= UBI_MAX_SG_COUNT,
+@@ -441,6 +443,9 @@
+ 		ROOT_DEV = MKDEV(gd->major, gd->first_minor);
+ 	}
+ 
++	if (vi->ubi_num == 0 && !strcmp(vi->name, "rootfs"))
++		rtac86u_wp_event(RTAC86U_WP_ROOT_DISK_REGISTERED,
++				 disk_devt(gd), 0);
+ 	return 0;
+ 
+ out_remove_minor:
+@@ -469,6 +474,16 @@
+ 	put_disk(dev->gd);
+ 	blk_mq_free_tag_set(&dev->tag_set);
+ 	idr_remove(&ubiblock_minor_idr, id);
++}
++
++int ubiblock_create(struct ubi_volume_info *vi)
++{
++	int ret = ubiblock_create_without_waypoints(vi);
++
++	if (ret && ret != -EEXIST && vi->ubi_num == 0 &&
++	    !strcmp(vi->name, "rootfs"))
++		rtac86u_wp_event(RTAC86U_WP_ROOT_DISK_FAILED, 0, ret);
++	return ret;
+ }
+ 
+ int ubiblock_remove(struct ubi_volume_info *vi)
+--- a/drivers/mtd/ubi/build.c
++++ b/drivers/mtd/ubi/build.c
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include <linux/err.h>
++#include <linux/rtac86u_bootwaypoints.h>
+ #include <linux/rtac86u_bootdiag.h>
+ #include <linux/module.h>
+ #include <linux/moduleparam.h>
+@@ -1061,6 +1062,8 @@
+ 
+ 	ubi_devices[ubi_num] = ubi;
+ 	ubi_notify_all(ubi, UBI_VOLUME_ADDED, NULL);
++	if (ubi_num == 0)
++		rtac86u_wp_event(RTAC86U_WP_UBI_ATTACHED, 0, 0);
+ 	rtac86u_bootdiag_checkpoint(7, 1);
+ 	return ubi_num;
+ 
+--- /dev/null
++++ b/include/linux/rtac86u_bootwaypoints.h
+@@ -0,0 +1,73 @@
++/* <FILE>include/linux/rtac86u_bootwaypoints.h</FILE> - <DESC>Board-scoped boot waypoint facts and copied snapshots without LED callbacks.</DESC> */
++/* <VERS>VERSION: 0.1.1</VERS> */
++/* <WCTX>Share four-zone boot state between narrow kernel hooks and the LED register owner.</WCTX> */
++/* <CLOG>Declare atomic startup finalization with a disabled-provider stub.</CLOG> */
++#ifndef _LINUX_RTAC86U_BOOTWAYPOINTS_H
++#define _LINUX_RTAC86U_BOOTWAYPOINTS_H
++#include <linux/kconfig.h>
++#include <linux/types.h>
++
++enum rtac86u_wp_phase {
++	RTAC86U_WP_ENTER = 0,
++	RTAC86U_WP_DONE = 1,
++	RTAC86U_WP_ERROR = 2,
++};
++
++enum rtac86u_wp_event {
++	RTAC86U_WP_UBI_ATTACHED = 1,
++	RTAC86U_WP_ROOT_DISK_REGISTERED,
++	RTAC86U_WP_ROOT_DISK_FAILED,
++	RTAC86U_WP_ROOT_SELECTED,
++	RTAC86U_WP_ROOT_NODE,
++	RTAC86U_WP_MOUNT_BEGIN,
++	RTAC86U_WP_MOUNT_END,
++	RTAC86U_WP_TARGET_LOOKUP,
++	RTAC86U_WP_SOURCE_LOOKUP,
++	RTAC86U_WP_SOURCE_INVALID,
++	RTAC86U_WP_BDEV_MISSING,
++	RTAC86U_WP_DISK_NOT_LIVE,
++	RTAC86U_WP_DRIVER_OPEN,
++	RTAC86U_WP_UBI_OPEN,
++	RTAC86U_WP_BDEV_READY,
++};
++
++struct rtac86u_wp_snapshot {
++	unsigned int completed_mask;
++	unsigned int active_zone;
++	unsigned int substep;
++	bool failed;
++	unsigned int site;
++	int error;
++	unsigned int root_dev;
++	unsigned int root_disk;
++};
++
++#if IS_BUILTIN(CONFIG_LEDS_BCM63138) || defined(RTAC86U_WP_PROVIDER)
++bool rtac86u_wp_enable(void);
++bool rtac86u_wp_enabled(void);
++bool rtac86u_wp_finish_startup(void);
++void rtac86u_wp_legacy(unsigned int stage, unsigned int phase);
++void rtac86u_wp_step(unsigned int zone, unsigned int step, unsigned int phase);
++void rtac86u_wp_event(unsigned int event, unsigned int value, int error);
++void rtac86u_wp_snapshot(struct rtac86u_wp_snapshot *snapshot);
++bool rtac86u_wp_panic(struct rtac86u_wp_snapshot *snapshot, int error, bool fatal);
++#else
++static inline bool rtac86u_wp_enable(void) { return false; }
++static inline bool rtac86u_wp_enabled(void) { return false; }
++static inline bool rtac86u_wp_finish_startup(void) { return false; }
++static inline void rtac86u_wp_legacy(unsigned int stage, unsigned int phase) {}
++static inline void rtac86u_wp_step(unsigned int zone, unsigned int step,
++				 unsigned int phase) {}
++static inline void rtac86u_wp_event(unsigned int event, unsigned int value,
++				  int error) {}
++static inline void rtac86u_wp_snapshot(struct rtac86u_wp_snapshot *snapshot)
++{
++	if (snapshot)
++		*snapshot = (struct rtac86u_wp_snapshot) {};
++}
++static inline bool rtac86u_wp_panic(struct rtac86u_wp_snapshot *snapshot,
++				  int error, bool fatal) { return false; }
++#endif
++#endif
++/* <FILE>include/linux/rtac86u_bootwaypoints.h</FILE> - <DESC>Board-scoped boot waypoint facts and copied snapshots without LED callbacks.</DESC> */
++/* <VERS>END OF VERSION: 0.1.1</VERS> */
+--- /dev/null
++++ b/drivers/leds/blink/rtac86u-bootwaypoints.c
+@@ -0,0 +1,333 @@
++// SPDX-License-Identifier: GPL-2.0
++/* <FILE>drivers/leds/blink/rtac86u-bootwaypoints.c</FILE> - <DESC>Board-local waypoint facts and root-mount failure scope without hardware callbacks.</DESC> */
++/* <VERS>VERSION: 0.1.1</VERS> */
++/* <WCTX>Separate precise boot state from the LED provider's register and pulse scheduling ownership.</WCTX> */
++/* <CLOG>Validate private preinit success before atomically recording the final startup waypoints.</CLOG> */
++#define RTAC86U_WP_PROVIDER
++#include <linux/rtac86u_bootwaypoints.h>
++#include <linux/errno.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/sched.h>
++#include <linux/spinlock.h>
++
++struct rtac86u_wp_state {
++	bool enabled;
++	bool precise;
++	bool frozen;
++	bool ubi_attached;
++	bool root_disk_ready;
++	bool root_disk_failed;
++	unsigned int success[4];
++	struct task_struct *owner;
++	int node_error;
++	unsigned int first_site;
++	int first_error;
++	struct rtac86u_wp_snapshot snapshot;
++};
++
++static DEFINE_SPINLOCK(rtac86u_wp_lock);
++static struct rtac86u_wp_state wp;
++
++static void rtac86u_wp_step_locked(unsigned int zone, unsigned int step,
++				    unsigned int phase)
++{
++	if (!zone || zone > 4 || !step || step > 4 || phase > 2)
++		return;
++	if (phase == RTAC86U_WP_DONE) {
++		wp.success[zone - 1] |= BIT(step - 1);
++		if (wp.success[zone - 1] == 0xf)
++			wp.snapshot.completed_mask |= BIT(zone - 1);
++		/* Completing an outer operation must not erase nested progress. */
++		if (wp.snapshot.active_zone == zone && wp.snapshot.substep > step)
++			return;
++	}
++	wp.snapshot.active_zone = zone;
++	wp.snapshot.substep = step;
++}
++
++static unsigned int rtac86u_wp_missing_site_locked(void)
++{
++	if (!wp.ubi_attached)
++		return 1;
++	if (wp.root_disk_failed)
++		return 3;
++	if (!wp.root_disk_ready)
++		return 2;
++	if (!wp.snapshot.root_dev ||
++	    wp.snapshot.root_dev != wp.snapshot.root_disk)
++		return 4;
++	return 9;
++}
++
++static void rtac86u_wp_failure_zone_locked(unsigned int site)
++{
++	if (site == 1) {
++		wp.snapshot.active_zone = 2;
++		wp.snapshot.substep = 3;
++	} else if (site >= 2 && site <= 4) {
++		wp.snapshot.active_zone = 2;
++		wp.snapshot.substep = 4;
++	} else {
++		wp.snapshot.active_zone = 3;
++		wp.snapshot.substep = site == 6 ? 1 :
++			(site == 5 || site == 7 || site == 8) ? 2 :
++			(site == 9 || site == 10) ? 3 : 4;
++	}
++}
++
++bool rtac86u_wp_enable(void)
++{
++	unsigned long flags;
++
++	if (!of_machine_is_compatible("asus,rt-ac86u") ||
++	    !of_property_read_bool(of_root, "asus,rt-ac86u-bootzones"))
++		return false;
++	spin_lock_irqsave(&rtac86u_wp_lock, flags);
++	if (!wp.enabled) {
++		wp.enabled = true;
++		wp.precise = of_property_read_bool(of_root,
++						  "asus,rt-ac86u-rootpathdiag");
++	}
++	spin_unlock_irqrestore(&rtac86u_wp_lock, flags);
++	return true;
++}
++EXPORT_SYMBOL_GPL(rtac86u_wp_enable);
++
++bool rtac86u_wp_enabled(void)
++{
++	return READ_ONCE(wp.enabled);
++}
++EXPORT_SYMBOL_GPL(rtac86u_wp_enabled);
++
++void rtac86u_wp_step(unsigned int zone, unsigned int step, unsigned int phase)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&rtac86u_wp_lock, flags);
++	if (wp.enabled && !wp.frozen)
++		rtac86u_wp_step_locked(zone, step, phase);
++	spin_unlock_irqrestore(&rtac86u_wp_lock, flags);
++}
++EXPORT_SYMBOL_GPL(rtac86u_wp_step);
++
++bool rtac86u_wp_finish_startup(void)
++{
++	unsigned long flags;
++	bool ready;
++
++	spin_lock_irqsave(&rtac86u_wp_lock, flags);
++	/*
++	 * The caller may finish startup, never invent preinit success or erase
++	 * a frozen failure. Check private per-step facts before any mutation.
++	 */
++	ready = wp.enabled && !wp.frozen && !wp.snapshot.failed &&
++		(wp.snapshot.completed_mask & 0x7) == 0x7 &&
++		wp.snapshot.active_zone == 4 &&
++		wp.snapshot.substep >= 2 && wp.snapshot.substep <= 4 &&
++		(wp.success[3] & 0x3) == 0x3;
++	if (ready) {
++		rtac86u_wp_step_locked(4, 3, RTAC86U_WP_DONE);
++		rtac86u_wp_step_locked(4, 4, RTAC86U_WP_DONE);
++	}
++	spin_unlock_irqrestore(&rtac86u_wp_lock, flags);
++	return ready;
++}
++EXPORT_SYMBOL_GPL(rtac86u_wp_finish_startup);
++
++void rtac86u_wp_legacy(unsigned int stage, unsigned int phase)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&rtac86u_wp_lock, flags);
++	if (!wp.enabled || wp.frozen)
++		goto out;
++	switch (stage) {
++	case 1: rtac86u_wp_step_locked(1, 1, phase); break;
++	case 2: rtac86u_wp_step_locked(1, 2, phase); break;
++	case 4: rtac86u_wp_step_locked(1, 3, phase); break;
++	case 5: rtac86u_wp_step_locked(1, 4, phase); break;
++	case 3: rtac86u_wp_step_locked(2, 1, phase); break;
++	case 6: rtac86u_wp_step_locked(2, 2, phase); break;
++	case 7:
++		if (phase == RTAC86U_WP_DONE)
++			wp.ubi_attached = true;
++		rtac86u_wp_step_locked(2, 3, phase);
++		break;
++	case 8:
++	case 9:
++		rtac86u_wp_step_locked(3, 1, RTAC86U_WP_ENTER);
++		break;
++	case 10:
++		if (phase == RTAC86U_WP_DONE) {
++			unsigned int step;
++
++			for (step = 1; step <= 4; step++)
++				rtac86u_wp_step_locked(3, step, RTAC86U_WP_DONE);
++		}
++		break;
++	case 12: rtac86u_wp_step_locked(4, 1, phase); break;
++	case 13:
++		rtac86u_wp_step_locked(4, 1, RTAC86U_WP_DONE);
++		rtac86u_wp_step_locked(4, 2, phase);
++		break;
++	case 14: rtac86u_wp_step_locked(4, 3, phase); break;
++	}
++out:
++	spin_unlock_irqrestore(&rtac86u_wp_lock, flags);
++}
++EXPORT_SYMBOL_GPL(rtac86u_wp_legacy);
++
++void rtac86u_wp_event(unsigned int event, unsigned int value, int error)
++{
++	unsigned long flags;
++	unsigned int site = 0;
++
++	spin_lock_irqsave(&rtac86u_wp_lock, flags);
++	if (!wp.enabled || wp.frozen)
++		goto out;
++	switch (event) {
++	case RTAC86U_WP_UBI_ATTACHED:
++		if (!error) {
++			wp.ubi_attached = true;
++			rtac86u_wp_step_locked(2, 3, RTAC86U_WP_DONE);
++		}
++		goto out;
++	case RTAC86U_WP_ROOT_DISK_REGISTERED:
++		if (!error) {
++			wp.root_disk_ready = true;
++			wp.root_disk_failed = false;
++			wp.snapshot.root_disk = value;
++			rtac86u_wp_step_locked(2, 4, RTAC86U_WP_DONE);
++		}
++		goto out;
++	}
++	if (!wp.precise)
++		goto out;
++	switch (event) {
++	case RTAC86U_WP_ROOT_DISK_FAILED:
++		wp.root_disk_failed = true;
++		goto out;
++	case RTAC86U_WP_ROOT_SELECTED:
++		wp.snapshot.root_dev = value;
++		goto out;
++	case RTAC86U_WP_ROOT_NODE:
++		wp.node_error = error;
++		if (!error)
++			rtac86u_wp_step_locked(3, 2, RTAC86U_WP_DONE);
++		goto out;
++	case RTAC86U_WP_MOUNT_BEGIN:
++		wp.owner = current;
++		wp.first_site = 0;
++		wp.first_error = 0;
++		wp.snapshot.site = 0;
++		wp.snapshot.error = 0;
++		wp.snapshot.root_dev = value;
++		rtac86u_wp_step_locked(3, 1, RTAC86U_WP_ENTER);
++		goto out;
++	case RTAC86U_WP_MOUNT_END:
++		if (wp.owner == current) {
++			wp.owner = NULL;
++			if (!error) {
++				unsigned int step;
++
++				for (step = 1; step <= 4; step++)
++					rtac86u_wp_step_locked(3, step,
++							      RTAC86U_WP_DONE);
++			}
++		}
++		goto out;
++	}
++	if (wp.owner != current)
++		goto out;
++	switch (event) {
++	case RTAC86U_WP_TARGET_LOOKUP:
++		if (error) site = 6;
++		else rtac86u_wp_step_locked(3, 1, RTAC86U_WP_DONE);
++		break;
++	case RTAC86U_WP_SOURCE_LOOKUP:
++		if (error) site = 7;
++		else rtac86u_wp_step_locked(3, 2, RTAC86U_WP_DONE);
++		break;
++	case RTAC86U_WP_SOURCE_INVALID:
++		if (error) site = 8;
++		break;
++	case RTAC86U_WP_BDEV_MISSING:
++		if (error) site = rtac86u_wp_missing_site_locked();
++		break;
++	case RTAC86U_WP_BDEV_READY:
++		rtac86u_wp_step_locked(3, 3, RTAC86U_WP_DONE);
++		break;
++	case RTAC86U_WP_DISK_NOT_LIVE:
++		if (error) site = 10;
++		break;
++	case RTAC86U_WP_DRIVER_OPEN:
++		if (error == -ENOENT) site = 11;
++		else if (error == -ENXIO) site = 12;
++		if (!error)
++			rtac86u_wp_step_locked(3, 4, RTAC86U_WP_ENTER);
++		break;
++	case RTAC86U_WP_UBI_OPEN:
++		if (error) site = 13;
++		break;
++	}
++	if (site && !wp.first_site) {
++		wp.first_site = site;
++		wp.first_error = error;
++		wp.snapshot.site = site;
++		wp.snapshot.error = error;
++	}
++out:
++	spin_unlock_irqrestore(&rtac86u_wp_lock, flags);
++}
++EXPORT_SYMBOL_GPL(rtac86u_wp_event);
++
++void rtac86u_wp_snapshot(struct rtac86u_wp_snapshot *snapshot)
++{
++	unsigned long flags;
++
++	if (!snapshot)
++		return;
++	spin_lock_irqsave(&rtac86u_wp_lock, flags);
++	*snapshot = wp.snapshot;
++	spin_unlock_irqrestore(&rtac86u_wp_lock, flags);
++}
++EXPORT_SYMBOL_GPL(rtac86u_wp_snapshot);
++
++bool rtac86u_wp_panic(struct rtac86u_wp_snapshot *snapshot, int error, bool fatal)
++{
++	unsigned long flags;
++	unsigned int site;
++
++	if (!snapshot || !spin_trylock_irqsave(&rtac86u_wp_lock, flags))
++		return false;
++	if (!wp.enabled) {
++		spin_unlock_irqrestore(&rtac86u_wp_lock, flags);
++		return false;
++	}
++	if (!wp.frozen) {
++		if (fatal && wp.precise) {
++			site = wp.node_error ? 5 : wp.first_site;
++			if (!site && (error == -ENOENT || error == -ENXIO)) {
++				site = rtac86u_wp_missing_site_locked();
++				if (site == 9)
++					site = error == -ENOENT ? 14 : 15;
++			}
++			wp.snapshot.site = site;
++			wp.snapshot.error = wp.node_error ? wp.node_error :
++				wp.first_site ? wp.first_error : error;
++			rtac86u_wp_failure_zone_locked(site);
++		}
++		wp.snapshot.failed = true;
++		wp.frozen = true;
++	}
++	*snapshot = wp.snapshot;
++	spin_unlock_irqrestore(&rtac86u_wp_lock, flags);
++	return true;
++}
++EXPORT_SYMBOL_GPL(rtac86u_wp_panic);
++
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("RT-AC86U opt-in boot waypoint and root failure facts");
++/* <FILE>drivers/leds/blink/rtac86u-bootwaypoints.c</FILE> - <DESC>Board-local waypoint facts and root-mount failure scope without hardware callbacks.</DESC> */
++/* <VERS>END OF VERSION: 0.1.1</VERS> */
+
+# <FILE>target/linux/bcm4908/patches-6.12/405-rt-ac86u-root-path-sites.patch</FILE> - <DESC>Board-scoped boot waypoint core and precise root mount failure observations.</DESC>
+# <VERS>END OF VERSION: 0.1.2</VERS>

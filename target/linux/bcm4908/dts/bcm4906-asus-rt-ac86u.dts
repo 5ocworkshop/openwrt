@@ -1,0 +1,342 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+// <FILE>target/linux/bcm4908/dts/bcm4906-asus-rt-ac86u.dts</FILE> - <DESC>RT-AC86U Ethernet board candidate with live-verified NAND and MAC layout.</DESC>
+// <VERS>VERSION: 0.9.1</VERS>
+// <WCTX>Reproduce the stock PCI-zero RAM view using the upstream PCIe driver's BAR2 mapping.</WCTX>
+// <CLOG>Describe WAN-red startup ownership consistently with the carrier/default-route handoff policy.</CLOG>
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/soc/bcm-pmb.h>
+
+// External DTS ownership keeps board-only edits out of kernel preparation hashes.
+#include "broadcom/bcmbca/bcm4906.dtsi"
+
+/ {
+	asus,rt-ac86u-bootdiag;
+	asus,rt-ac86u-rootdiag;
+	asus,rt-ac86u-rootpathdiag;
+	asus,rt-ac86u-bootzones;
+	compatible = "asus,rt-ac86u", "brcm,bcm4906", "brcm,bcm4908", "brcm,bcmbca";
+	model = "ASUS RT-AC86U";
+
+	aliases {
+		led-boot = &led_power;
+		led-failsafe = &led_power;
+		led-running = &led_power;
+		led-upgrade = &led_power;
+	};
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00 0x00 0x00 0x20000000>;
+	};
+
+	/* Host driver is a module without boot autoload; radio probing is manual. */
+	pcie0: pcie@80040000 {
+		compatible = "brcm,bcm4908-pcie";
+		reg = <0 0x80040000 0 0xa000>;
+		power-domains = <&pmb BCM_PMB_PCIE0>;
+		resets = <&{/bus@ff800000/misc@2600/reset-controller@2644} 0>;
+		reset-names = "perst";
+		interrupts = <GIC_SPI 59 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "pcie";
+		device_type = "pci";
+		linux,pci-domain = <0>;
+		bus-range = <0 0xff>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		#interrupt-cells = <1>;
+		interrupt-map-mask = <0 0 0 7>;
+		interrupt-map = <0 0 0 1 &gic GIC_SPI 59 IRQ_TYPE_LEVEL_HIGH>;
+		/* No msi-parent: use the observed legacy INTA route first. */
+		msi-controller;
+		ranges = <0x02000000 0 0xc0000000 0 0xc0000000 0 0x10000000>;
+		/* Reproduce stock PCI-zero RAM view via mainline BAR2, 512 MiB. */
+		dma-ranges = <0x02000000 0 0 0 0 0 0x20000000>;
+
+		pci@0,0 {
+			device_type = "pci";
+			#address-cells = <3>;
+			#size-cells = <2>;
+			reg = <0 0 0 0 0>;
+			ranges;
+
+			wifi@0,0 {
+				compatible = "brcm,bcm4366-fmac", "brcm,bcm4329-fmac";
+				reg = <0 0 0 0 0>;
+				brcm,board-type = "asus,rt-ac86u-radio0";
+			};
+		};
+	};
+
+	pcie1: pcie@80050000 {
+		compatible = "brcm,bcm4908-pcie";
+		reg = <0 0x80050000 0 0xa000>;
+		power-domains = <&pmb BCM_PMB_PCIE1>;
+		resets = <&{/bus@ff800000/misc@2600/reset-controller@2644} 1>;
+		reset-names = "perst";
+		interrupts = <GIC_SPI 60 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "pcie";
+		device_type = "pci";
+		linux,pci-domain = <1>;
+		bus-range = <0 0xff>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		#interrupt-cells = <1>;
+		interrupt-map-mask = <0 0 0 7>;
+		interrupt-map = <0 0 0 1 &gic GIC_SPI 60 IRQ_TYPE_LEVEL_HIGH>;
+		msi-controller;
+		ranges = <0x02000000 0 0xd0000000 0 0xd0000000 0 0x10000000>;
+		dma-ranges = <0x02000000 0 0 0 0 0 0x20000000>;
+
+		pci@0,0 {
+			device_type = "pci";
+			#address-cells = <3>;
+			#size-cells = <2>;
+			reg = <0 0 0 0 0>;
+			ranges;
+
+			wifi@0,0 {
+				compatible = "brcm,bcm4366-fmac", "brcm,bcm4329-fmac";
+				reg = <0 0 0 0 0>;
+				brcm,board-type = "asus,rt-ac86u-radio1";
+			};
+		};
+	};
+
+	keys {
+		compatible = "gpio-keys-polled";
+		poll-interval = <100>;
+
+		reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			gpios = <&gpio0 23 GPIO_ACTIVE_LOW>;
+		};
+
+		wps {
+			label = "wps";
+			linux,code = <KEY_WPS_BUTTON>;
+			gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
+		};
+	};
+
+};
+
+&usb_phy {
+	/* Match the BCM4908 vendor driver's SETUP IOC/IPP initialization. */
+	brcm,ioc = <1>;
+	brcm,ipp = <1>;
+	status = "okay";
+};
+
+&ehci {
+	status = "okay";
+};
+
+&ohci {
+	status = "okay";
+};
+
+&xhci {
+	status = "okay";
+};
+
+&{/bus@ff800000/pinctrl@560} {
+	usb_vbus_pins: usb-vbus-pins {
+		function = "gpio_3";
+		groups = "gpio_3_grp";
+	};
+};
+
+&gpio0 {
+	/* Driver core selects this state before gpio-mmio registers its hogs. */
+	pinctrl-names = "default";
+	pinctrl-0 = <&usb_vbus_pins>;
+
+	usb-vbus {
+		gpio-hog;
+		/* NVRAM AL describes the LED API; Merlin power-on resolves to pad3 high. */
+		gpios = <3 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "usb-vbus-enable";
+	};
+};
+
+&leds {
+	status = "okay";
+
+	led_power: led@4 {
+		reg = <4>;
+		function = LED_FUNCTION_POWER;
+		active-low;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pins_led_4_a>;
+		linux,default-trigger = "default-on";
+	};
+
+	/* Physical LAN order follows switch ports3..0, not ASUS logical LED names. */
+	led_lan4: led@10 {
+		reg = <16>;
+		label = "lan4";
+		function = LED_FUNCTION_LAN;
+		active-low;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pins_led_16_a>;
+	};
+
+	led_lan3: led@11 {
+		reg = <17>;
+		label = "lan3";
+		function = LED_FUNCTION_LAN;
+		active-low;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pins_led_17_a>;
+	};
+
+	led_lan2: led@12 {
+		reg = <18>;
+		label = "lan2";
+		function = LED_FUNCTION_LAN;
+		active-low;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pins_led_18_a>;
+	};
+
+	led_lan1: led@13 {
+		reg = <19>;
+		label = "lan1";
+		function = LED_FUNCTION_LAN;
+		active-low;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pins_led_19_a>;
+	};
+
+	led_wan_error: led@14 {
+		reg = <20>;
+		label = "wan-error";
+		function = LED_FUNCTION_WAN;
+		active-low;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pins_led_20_a>;
+		/* Startup indication; normal WAN policy reconciles carrier/routes after handoff. */
+		linux,default-trigger = "default-on";
+	};
+
+	led_wan: led@15 {
+		reg = <21>;
+		label = "wan";
+		function = LED_FUNCTION_WAN;
+		active-low;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pins_led_21_a>;
+	};
+};
+
+&enet {
+	nvmem-cells = <&base_mac_addr>;
+	nvmem-cell-names = "mac-address";
+};
+
+&ports {
+	/* Printed LAN labels match the product table and per-jack cable checks. */
+	port@0 {
+		label = "lan4";
+	};
+
+	port@1 {
+		label = "lan3";
+	};
+
+	port@2 {
+		label = "lan2";
+	};
+
+	port@3 {
+		label = "lan1";
+	};
+
+	port@7 {
+		reg = <7>;
+		phy-mode = "internal";
+		phy-handle = <&phy12>;
+		label = "wan";
+	};
+};
+
+&nand_controller {
+	status = "okay";
+};
+
+&nandcs {
+	nand-ecc-strength = <4>;
+	nand-ecc-step-size = <512>;
+	nand-on-flash-bbt;
+
+	partitions {
+		compatible = "brcm,bcm4908-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@0 {
+			label = "cferom";
+			reg = <0x0 0x100000>;
+			read-only;
+
+			nvmem-layout {
+				compatible = "fixed-layout";
+				#address-cells = <1>;
+				#size-cells = <1>;
+
+				base_mac_addr: mac@106a0 {
+					reg = <0x106a0 0x6>;
+				};
+			};
+		};
+
+		/* CFE's NAND_RFS_OFS selects firmware versus backup at runtime. */
+		partition@100000 {
+			compatible = "brcm,bcm4908-firmware";
+			reg = <0x100000 0x5f00000>;
+		};
+
+		partition@6000000 {
+			compatible = "brcm,bcm4908-firmware";
+			reg = <0x6000000 0x5f00000>;
+		};
+
+		partition@bf00000 {
+			label = "misc1";
+			reg = <0xbf00000 0x800000>;
+			read-only;
+		};
+
+		partition@c700000 {
+			label = "misc2";
+			reg = <0xc700000 0x2f00000>;
+			read-only;
+		};
+
+		partition@f600000 {
+			label = "misc3";
+			reg = <0xf600000 0x100000>;
+			read-only;
+		};
+
+		partition@f700000 {
+			label = "data";
+			reg = <0xf700000 0x800000>;
+			read-only;
+		};
+
+		partition@ff00000 {
+			label = "reserved";
+			reg = <0xff00000 0x100000>;
+			read-only;
+		};
+	};
+};
+
+// <FILE>target/linux/bcm4908/dts/bcm4906-asus-rt-ac86u.dts</FILE> - <DESC>RT-AC86U Ethernet board candidate with live-verified NAND and MAC layout.</DESC>
+// <VERS>END OF VERSION: 0.9.1</VERS>

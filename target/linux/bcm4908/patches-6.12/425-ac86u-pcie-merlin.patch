@@ -1,0 +1,184 @@
+# <FILE>target/linux/bcm4908/patches-6.12/425-ac86u-pcie-merlin.patch</FILE> - <DESC>Scoped default-off Merlin host windows for the AC86U fork.</DESC>
+# <VERS>VERSION: 0.1.1</VERS>
+# <WCTX>Mirror the verified stock inbound windows before child enumeration using validated DDR ranges.</WCTX>
+# <CLOG>Gate the inherited INTx call behind the same exact AC/profile scope after successful DDR layout validation.</CLOG>
+# Applies after diagnostic patches412 and424. SCB/endian/CLKREQ/ASPM stay native; stock SSC enablement uses the native helper, whose MDIO equivalence is unproved.
+# Stock SSC proof: linux4.1 vmlinux .init.text ffffffc0006bcf58..6bcf60 calls bcm963xx_pcie_phy_enable_ssc at ffffffc00039ae80 with enable=1.
+--- a/drivers/pci/controller/pcie-brcmstb.c
++++ b/drivers/pci/controller/pcie-brcmstb.c
+@@ -293,6 +293,24 @@
+ 	bool			ep_wakeup_capable;
+ 	const struct pcie_cfg_data	*cfg;
+ };
++
++static bool ac86u_merlin_host_compat;
++module_param_named(ac86u_merlin_host_compat, ac86u_merlin_host_compat, bool, 0400);
++MODULE_PARM_DESC(ac86u_merlin_host_compat, "Scoped AC86U Merlin inbound window profile");
++
++static bool brcm_pcie_merlin_host_enabled(struct brcm_pcie *pcie)
++{
++	return ac86u_merlin_host_compat && pcie->cfg->soc_base == BCM4908 &&
++		of_machine_is_compatible("asus,rt-ac86u");
++}
++
++static int brcm_pcie_merlin_ssc_result(struct brcm_pcie *pcie, int ret)
++{
++	if (!brcm_pcie_merlin_host_enabled(pcie))
++		return 0;
++	dev_info(pcie->dev, "AC86U_MERLIN_HOST native SSC helper rc=%d\n", ret);
++	return ret;
++}
+ 
+ static bool ac86u_probe_host_snapshot;
+ module_param_named(ac86u_probe_host_snapshot, ac86u_probe_host_snapshot, bool, 0400);
+@@ -1333,6 +1351,8 @@
+ 
+ 	if (pcie->ssc) {
+ 		ret = brcm_pcie_set_ssc(pcie);
++		if (brcm_pcie_merlin_ssc_result(pcie, ret))
++			return ret;
+ 		if (ret == 0)
+ 			ssc_good = true;
+ 		else
+@@ -1825,6 +1845,19 @@
+ 	dev_info(pcie->dev, "experimental BCM4908 legacy INTx: unmasked INTA-D (0x1e)\n");
+ }
+ 
++#include "ac86u_merlin_host.h"
++
++static int brcm_pcie_configure_merlin_host(struct brcm_pcie *pcie)
++{
++	int ret = brcm_pcie_apply_merlin_profile(pcie);
++
++	if (ret)
++		return ret;
++	if (brcm_pcie_merlin_host_enabled(pcie))
++		brcm_pcie_bcm4908_unmask_intx(pcie);
++	return 0;
++}
++
+ static int brcm_pcie_probe(struct platform_device *pdev)
+ {
+ 	struct device_node *np = pdev->dev.of_node;
+@@ -1860,6 +1893,8 @@
+ 	pcie->gen = (ret < 0) ? 0 : ret;
+ 
+ 	pcie->ssc = of_property_read_bool(np, "brcm,enable-ssc");
++	if (brcm_pcie_merlin_host_enabled(pcie))
++		pcie->ssc = true;
+ 
+ 	pcie->rescal = devm_reset_control_get_optional_shared(&pdev->dev, "rescal");
+ 	if (IS_ERR(pcie->rescal))
+@@ -1947,7 +1982,9 @@
+ 
+ 	platform_set_drvdata(pdev, pcie);
+ 
+-	brcm_pcie_bcm4908_unmask_intx(pcie);
++	ret = brcm_pcie_configure_merlin_host(pcie);
++	if (ret)
++		goto fail;
+ 
+ 	brcm_pcie_ac86u_host_snapshot(pcie, false);
+ 
+--- a/drivers/pci/controller/ac86u_merlin_host.h
++++ b/drivers/pci/controller/ac86u_merlin_host.h
+@@ -0,0 +1,97 @@
++// <FILE>drivers/pci/controller/ac86u_merlin_host.h</FILE> - <DESC>Scoped AC86U Merlin inbound window compatibility profile.</DESC>
++// <VERS>VERSION: 0.1.0</VERS>
++// <WCTX>Mirror verified stock windows before child enumeration while preserving Linux transport interfaces.</WCTX>
++// <CLOG>Validate the identity DDR range, use native size encoding, and verify stock window readbacks.</CLOG>
++static int brcm_pcie_merlin_readback(struct brcm_pcie *pcie, const char *phase,
++				   const u32 *expected)
++{
++	static const u32 offsets[] = {
++		PCIE_MISC_RC_BAR1_CONFIG_LO,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 4,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 8,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 12,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 16,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 20,
++		PCIE_MISC_UBUS_BAR1_CONFIG_REMAP,
++		PCIE_MISC_MISC_CTRL,
++		PCIE_RC_CFG_VENDOR_VENDOR_SPECIFIC_REG1,
++	};
++	u32 value[ARRAY_SIZE(offsets)];
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(offsets); i++)
++		value[i] = readl(pcie->base + offsets[i]);
++	dev_info(pcie->dev,
++		 "AC86U_MERLIN_HOST phase=%s bar1_lo=%#x bar1_hi=%#x bar2_lo=%#x bar2_hi=%#x bar3_lo=%#x bar3_hi=%#x bar1_remap=%#x misc_ctrl=%#x vendor_reg1=%#x\n",
++		 phase, value[0], value[1], value[2], value[3], value[4],
++		 value[5], value[6], value[7], value[8]);
++	if (expected)
++		for (i = 0; i < 7; i++)
++			if (value[i] != expected[i]) {
++				dev_err(pcie->dev,
++					"AC86U_MERLIN_HOST readback mismatch offset=%#x got=%#x expected=%#x\n",
++					offsets[i], value[i], expected[i]);
++				return -EIO;
++			}
++	return 0;
++}
++
++static int brcm_pcie_apply_merlin_profile(struct brcm_pcie *pcie)
++{
++	static const u32 offsets[] = {
++		PCIE_MISC_RC_BAR1_CONFIG_LO,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 4,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 8,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 12,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 16,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 20,
++		PCIE_MISC_UBUS_BAR1_CONFIG_REMAP,
++	};
++	struct pci_host_bridge *bridge;
++	struct resource_entry *entry;
++	u64 cpu_addr = 0, ddr_size = 0;
++	u32 value[ARRAY_SIZE(offsets)];
++	unsigned int nranges = 0, i;
++	int full_size, alias_size;
++
++	if (!brcm_pcie_merlin_host_enabled(pcie))
++		return 0;
++
++	bridge = pci_host_bridge_from_priv(pcie);
++	resource_list_for_each_entry(entry, &bridge->dma_ranges) {
++		cpu_addr = entry->res->start;
++		ddr_size = resource_size(entry->res);
++		nranges++;
++		if (resource_type(entry->res) != IORESOURCE_MEM ||
++		    cpu_addr != 0 || entry->offset != 0 || ddr_size != SZ_512M)
++			goto invalid_layout;
++	}
++	if (nranges != 1 || pcie->num_memc != 1 ||
++	    pcie->memc_size[0] != ddr_size)
++		goto invalid_layout;
++
++	full_size = brcm_pcie_encode_ibar_size(ddr_size);
++	alias_size = brcm_pcie_encode_ibar_size(SZ_64M);
++	if (!full_size || !alias_size)
++		goto invalid_layout;
++	value[0] = full_size;
++	value[1] = 0;
++	value[2] = 0x80000000U | alias_size;
++	value[3] = 0;
++	value[4] = 0;
++	value[5] = 0;
++	value[6] = lower_32_bits(cpu_addr) |
++		PCIE_MISC_UBUS_BAR1_CONFIG_REMAP_ACCESS_EN_MASK;
++
++	brcm_pcie_merlin_readback(pcie, "before", NULL);
++	for (i = 0; i < ARRAY_SIZE(offsets); i++)
++		writel(value[i], pcie->base + offsets[i]);
++	return brcm_pcie_merlin_readback(pcie, "after", value);
++
++invalid_layout:
++	dev_err(pcie->dev,
++		"AC86U_MERLIN_HOST requires one CPU0/PCI0 identity 512MiB DMA range and matching SCB memory\n");
++	return -EINVAL;
++}
++// <FILE>drivers/pci/controller/ac86u_merlin_host.h</FILE> - <DESC>Scoped AC86U Merlin inbound window compatibility profile.</DESC>
++// <VERS>END OF VERSION: 0.1.0</VERS>
+# <FILE>target/linux/bcm4908/patches-6.12/425-ac86u-pcie-merlin.patch</FILE> - <DESC>Scoped default-off Merlin host windows for the AC86U fork.</DESC>
+# <VERS>END OF VERSION: 0.1.1</VERS>

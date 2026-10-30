@@ -1,0 +1,254 @@
+# <FILE>target/linux/bcm4908/patches-6.12/404-rt-ac86u-root-mount-led-detail.patch</FILE> - <DESC>Opt-in root device, filesystem, cleanup and VFS errno LED instrumentation.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Localize the RT-AC86U reset after entering root mounting without changing its storage behavior.</WCTX>
+# <CLOG>Add root-only LED markers and panic errno display with a bounded observation interval.</CLOG>
+
+--- a/drivers/leds/blink/leds-bcm63138.c
++++ b/drivers/leds/blink/leds-bcm63138.c
+@@ -6,6 +6,8 @@
+ #include <linux/capability.h>
+ #include <linux/notifier.h>
+ #include <linux/panic_notifier.h>
++#include <linux/panic.h>
++#include <linux/errno.h>
+ #define RTAC86U_BOOTDIAG_PROVIDER
+ #include <linux/rtac86u_bootdiag.h>
+ #include <linux/io.h>
+@@ -56,6 +58,9 @@
+ 	bool bootdiag;
+ 	u32 bootdiag_available;
+ 	bool bootdiag_panicked;
++	bool rootdiag;
++	bool rootdiag_fatal;
++	int rootdiag_error;
+ 	unsigned int bootdiag_stage;
+ 	unsigned int bootdiag_phase;
+ 	struct notifier_block bootdiag_panic;
+@@ -210,6 +215,77 @@
+ 
+ EXPORT_SYMBOL_GPL(rtac86u_bootdiag_complete);
+ 
++static unsigned int rtac86u_rootdiag_error_code(int error)
++{
++	switch (error) {
++	case 0:
++		return 0;
++	case -ENXIO:
++	case -ENOENT:
++		return 1;
++	case -EIO:
++	case -EBADMSG:
++		return 2;
++	case -EINVAL:
++		return 3;
++	case -EACCES:
++		return 4;
++	case -ENODEV:
++		return 5;
++	case -ENOMEM:
++		return 6;
++	default:
++		return 7;
++	}
++}
++
++void rtac86u_rootdiag_checkpoint(unsigned int stage, unsigned int phase)
++{
++	struct bcm63138_leds *leds;
++	unsigned long flags;
++	bool changed = false;
++
++	if (!stage || stage > 15 || phase > 2)
++		return;
++	spin_lock_irqsave(&rtac86u_bootdiag_lock, flags);
++	leds = rtac86u_bootdiag_controller;
++	if (leds && leds->rootdiag) {
++		spin_lock(&leds->lock);
++		if (!leds->bootdiag_panicked) {
++			rtac86u_bootdiag_render(leds, stage, phase);
++			changed = true;
++		}
++		spin_unlock(&leds->lock);
++	}
++	spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
++	if (changed)
++		pr_info("rt-ac86u rootdiag: stage=%u phase=%u\n", stage, phase);
++}
++EXPORT_SYMBOL_GPL(rtac86u_rootdiag_checkpoint);
++
++void rtac86u_rootdiag_panic(int error)
++{
++	struct bcm63138_leds *leds;
++	unsigned long flags;
++	bool recorded = false;
++
++	spin_lock_irqsave(&rtac86u_bootdiag_lock, flags);
++	leds = rtac86u_bootdiag_controller;
++	if (leds && leds->rootdiag) {
++		spin_lock(&leds->lock);
++		if (!leds->bootdiag_panicked) {
++			leds->rootdiag_error = error;
++			leds->rootdiag_fatal = true;
++			recorded = true;
++		}
++		spin_unlock(&leds->lock);
++	}
++	spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
++	if (recorded)
++		pr_info("rt-ac86u rootdiag: fatal VFS errno=%d\n", error);
++}
++EXPORT_SYMBOL_GPL(rtac86u_rootdiag_panic);
++
+ static int rtac86u_bootdiag_panic(struct notifier_block *nb,
+ 				 unsigned long event, void *data)
+ {
+@@ -218,6 +294,9 @@
+ 	struct bcm63138_led led = { .pin = 20 };
+ 	unsigned long flags;
+ 
++	/* Do not change the first-level diagnostic or other boards' timeout. */
++	if (READ_ONCE(leds->rootdiag))
++		WRITE_ONCE(panic_timeout, 10);
+ 	if (!spin_trylock_irqsave(&rtac86u_bootdiag_lock, flags))
+ 		return NOTIFY_DONE;
+ 	if (!spin_trylock(&leds->lock)) {
+@@ -225,6 +304,16 @@
+ 		return NOTIFY_DONE;
+ 	}
+ 	leds->bootdiag_panicked = true;
++	if (leds->rootdiag && leds->rootdiag_fatal) {
++		rtac86u_bootdiag_render(leds,
++			rtac86u_rootdiag_error_code(leds->rootdiag_error), 2);
++		/* Blinking LAN4 distinguishes an errno from a steady stage. */
++		led.pin = 16;
++		bcm63138_leds_set_bright(leds, &led, BCM63138_MAX_BRIGHTNESS);
++		bcm63138_leds_enable_led(leds, &led, BCM63138_MAX_BRIGHTNESS);
++		bcm63138_leds_set_flash_rate(leds, &led, 6);
++		led.pin = 20;
++	}
+ 	bcm63138_leds_set_bright(leds, &led, BCM63138_MAX_BRIGHTNESS);
+ 	bcm63138_leds_enable_led(leds, &led, BCM63138_MAX_BRIGHTNESS);
+ 	bcm63138_leds_set_flash_rate(leds, &led, 6);
+@@ -306,6 +395,7 @@
+ 	spin_lock_irqsave(&rtac86u_bootdiag_lock, flags);
+ 	spin_lock(&leds->lock);
+ 	leds->bootdiag = true;
++	leds->rootdiag = of_property_read_bool(of_root, "asus,rt-ac86u-rootdiag");
+ 	rtac86u_bootdiag_render(leds, 1, 1);
+ 	rtac86u_bootdiag_controller = leds;
+ 	spin_unlock(&leds->lock);
+--- a/include/linux/rtac86u_bootdiag.h
++++ b/include/linux/rtac86u_bootdiag.h
+@@ -1,7 +1,7 @@
+ /* <FILE>include/linux/rtac86u_bootdiag.h</FILE> - <DESC>Opt-in RT-AC86U boot checkpoint interface.</DESC> */
+-/* <VERS>VERSION: 0.1.1</VERS> */
++/* <VERS>VERSION: 0.2.0</VERS> */
+ /* <WCTX>Expose diagnostic checkpoints without requiring the LED driver on other platforms.</WCTX> */
+-/* <CLOG>Declare the stage/phase contract and disabled-driver no-op helpers.</CLOG> */
++/* <CLOG>Add guarded root-mount stages and fatal VFS errno reporting.</CLOG> */
+ #ifndef _LINUX_RTAC86U_BOOTDIAG_H
+ #define _LINUX_RTAC86U_BOOTDIAG_H
+ 
+@@ -12,12 +12,18 @@
+ void rtac86u_bootdiag_checkpoint(unsigned int stage, unsigned int phase);
+ /* Complete only an unchanged entry marker; retain nested successes/errors. */
+ void rtac86u_bootdiag_complete(unsigned int stage);
++/* Root detail helpers are active only in the separately opted-in root mode. */
++void rtac86u_rootdiag_checkpoint(unsigned int stage, unsigned int phase);
++void rtac86u_rootdiag_panic(int error);
+ #else
+ static inline void rtac86u_bootdiag_checkpoint(unsigned int stage,
+ 					     unsigned int phase) {}
+ static inline void rtac86u_bootdiag_complete(unsigned int stage) {}
++static inline void rtac86u_rootdiag_checkpoint(unsigned int stage,
++					    unsigned int phase) {}
++static inline void rtac86u_rootdiag_panic(int error) {}
+ #endif
+ 
+ #endif
+ /* <FILE>include/linux/rtac86u_bootdiag.h</FILE> - <DESC>Opt-in RT-AC86U boot checkpoint interface.</DESC> */
+-/* <VERS>END OF VERSION: 0.1.1</VERS> */
++/* <VERS>END OF VERSION: 0.2.0</VERS> */
+--- a/init/do_mounts.c
++++ b/init/do_mounts.c
+@@ -153,12 +153,18 @@
+ 	struct page *p = NULL;
+ 	char *data_page = NULL;
+ 	int ret;
++	unsigned int stage = fs && !strcmp(fs, "ubifs") ? 12 :
++			     fs && !strcmp(fs, "squashfs") ? 14 : 13;
++
++	rtac86u_rootdiag_checkpoint(stage, 0);
+ 
+ 	if (data) {
+ 		/* init_mount() requires a full page as fifth argument */
+ 		p = alloc_page(GFP_KERNEL);
+-		if (!p)
+-			return -ENOMEM;
++		if (!p) {
++			ret = -ENOMEM;
++			goto out;
++		}
+ 		data_page = page_address(p);
+ 		strscpy_pad(data_page, data, PAGE_SIZE);
+ 	}
+@@ -179,6 +185,7 @@
+ out:
+ 	if (p)
+ 		put_page(p);
++	rtac86u_rootdiag_checkpoint(stage, ret ? 2 : 1);
+ 	return ret;
+ }
+ 
+@@ -189,6 +196,7 @@
+ 	char *p;
+ 	char b[BDEVNAME_SIZE];
+ 	int num_fs, i;
++	int last_error = 0;
+ 
+ 	scnprintf(b, BDEVNAME_SIZE, "unknown-block(%u,%u)",
+ 		  MAJOR(ROOT_DEV), MINOR(ROOT_DEV));
+@@ -203,13 +211,16 @@
+ 		if (!*p)
+ 			continue;
+ 		err = do_mount_root(name, p, flags, root_mount_data);
++		last_error = err;
+ 		switch (err) {
+ 			case 0:
+ 				goto out;
+ 			case -EACCES:
+ 			case -EINVAL:
+ #ifdef CONFIG_BLOCK
++				rtac86u_rootdiag_checkpoint(15, 0);
+ 				init_flush_fput();
++				rtac86u_rootdiag_checkpoint(15, 1);
+ #endif
+ 				continue;
+ 		}
+@@ -234,6 +245,7 @@
+ 			pr_err("\n");
+ 		}
+ 
++		rtac86u_rootdiag_panic(err);
+ 		panic("VFS: Unable to mount root fs on %s", b);
+ 	}
+ 	if (!(flags & SB_RDONLY)) {
+@@ -247,6 +259,7 @@
+ 	for (i = 0, p = fs_names; i < num_fs; i++, p += strlen(p)+1)
+ 		printk(" %s", p);
+ 	printk("\n");
++	rtac86u_rootdiag_panic(last_error);
+ 	panic("VFS: Unable to mount root fs on \"%s\" or %s", pretty_name, b);
+ out:
+ 	put_page(page);
+@@ -411,6 +424,7 @@
+ 
+ void __init mount_root(char *root_device_name)
+ {
++	rtac86u_rootdiag_checkpoint(ROOT_DEV ? 10 : 11, 0);
+ #ifdef CONFIG_MTD_ROOTFS_ROOT_DEV
+ 	if (!mount_ubi_rootfs())
+ 		return;
+
+# <FILE>target/linux/bcm4908/patches-6.12/404-rt-ac86u-root-mount-led-detail.patch</FILE> - <DESC>Opt-in root device, filesystem, cleanup and VFS errno LED instrumentation.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>

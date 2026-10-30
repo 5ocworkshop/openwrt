@@ -1,0 +1,21 @@
+#!/bin/sh
+# <FILE>target/linux/bcm4908/base-files/etc/hotplug.d/firmware/10-ac86u-radio-nvram</FILE> - <DESC>Prepare AC86U radio NVRAM before the standard firmware loader reads it.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Use each router's preserved radio entries with stock brcmfmac and radio firmware.</WCTX>
+# <CLOG>Synchronously prepare only the two board-specific text requests through the read-only RAM provider.</CLOG>
+
+[ "${ACTION:-}" = add ] || exit 0
+case "${FIRMWARE:-}" in
+	brcm/brcmfmac4366c-pcie.asus,rt-ac86u-radio0.txt|brcm/brcmfmac4366c-pcie.asus,rt-ac86u-radio1.txt) ;;
+	*) exit 0 ;;
+esac
+
+factory_helper="${AC86U_RADIO_NVRAM_HELPER:-/usr/libexec/ac86u-radio-nvram}"
+if ! "$factory_helper"; then
+	factory_error='ac86u-radio-nvram: per-device radio data preparation failed'
+	logger -t ac86u-radio-nvram "$factory_error" 2>/dev/null || printf '%s\n' "$factory_error" >&2
+	exit 1
+fi
+
+# <FILE>target/linux/bcm4908/base-files/etc/hotplug.d/firmware/10-ac86u-radio-nvram</FILE> - <DESC>Prepare AC86U radio NVRAM before the standard firmware loader reads it.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>

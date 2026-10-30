@@ -1,8 +1,12 @@
+# <FILE>package/kernel/bcm63xx-cfe/Makefile</FILE> - <DESC>Stage published CFE payloads with a shared ASUS BCM4908 family path.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Reuse the original published CFE bytes for ASUS BCM4908 image consumers.</WCTX>
+# <CLOG>Relocate the GT-AC5300 payload to a physical shared path and retain its relative compatibility alias.</CLOG>
 include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=bcm63xx-cfe
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_SOURCE_URL:=https://github.com/openwrt/bcm63xx-cfe.git
 PKG_SOURCE_PROTO:=git
@@ -26,6 +30,14 @@ define Package/bcm63xx-cfe/description
   CFE RAM binaries for bcm63xx.
 endef
 
+define Build/Prepare
+	$(call Build/Prepare/Default)
+	@test -f "$(PKG_BUILD_DIR)/asus,gt-ac5300/cferam.000" && test ! -L "$(PKG_BUILD_DIR)/asus,gt-ac5300/cferam.000" || { echo 'Missing regular GT-AC5300 CFE payload' >&2; exit 1; }
+	mkdir -p "$(PKG_BUILD_DIR)/asus,bcm4908-family"
+	mv "$(PKG_BUILD_DIR)/asus,gt-ac5300/cferam.000" "$(PKG_BUILD_DIR)/asus,bcm4908-family/cferam.000"
+	ln -s ../asus,bcm4908-family/cferam.000 "$(PKG_BUILD_DIR)/asus,gt-ac5300/cferam.000"
+endef
+
 define Build/Compile
 	true
 endef
@@ -41,3 +53,5 @@ define Build/InstallDev
 endef
 
 $(eval $(call BuildPackage,bcm63xx-cfe))
+# <FILE>package/kernel/bcm63xx-cfe/Makefile</FILE> - <DESC>Stage published CFE payloads with a shared ASUS BCM4908 family path.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>

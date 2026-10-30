@@ -1,0 +1,38 @@
+#!/bin/sh
+# <FILE>target/linux/bcm4908/base-files/etc/hotplug.d/iface/95-rt-ac86u-wan-led</FILE> - <DESC>Reconcile current WAN indicator state after relevant interface notifications.</DESC>
+# <VERS>VERSION: 0.2.0</VERS>
+# <WCTX>Keep hotplug notifications separate from the shared carrier and default-route policy.</WCTX>
+# <CLOG>Delegate relevant WAN events to the shared reconciler without deriving brightness from logical interface actions.</CLOG>
+
+set -eu
+rtac86u_wan_status=0
+trap 'rtac86u_wan_status=$?; if [ "$rtac86u_wan_status" -ne 0 ]; then printf "[rt-ac86u-wan-led] reconciliation failed (%s)\n" "$rtac86u_wan_status" >&2; fi' EXIT
+
+mode=--once
+case "${1:-}" in
+--help)
+	printf '%s\n' 'Hotplug inputs: INTERFACE=wan; ACTION=ifup|ifdown|iflink|ifupdate.' \
+		'Events only request a fresh snapshot; the shared helper owns LED policy and writes.' \
+		'RTAC86U_WAN_LED_HELPER defaults to /usr/libexec/ac86u-wan-led.' \
+		'--dry-run delegates a read-only policy preview; --help prints this usage.' \
+		'Other positional hotplug arguments are ignored.'
+	exit 0
+	;;
+--dry-run) mode=--dry-run ;;
+-*) printf '[rt-ac86u-wan-led] unsupported argument: %s\n' "$1" >&2; exit 2 ;;
+*) ;;
+esac
+[ "${INTERFACE:-}" = 'wan' ] || exit 0
+case "${ACTION:-}" in ifup|ifdown|iflink|ifupdate) ;; *) exit 0 ;; esac
+
+helper="${RTAC86U_WAN_LED_HELPER:-/usr/libexec/ac86u-wan-led}"
+case "$helper" in /*) ;; *) printf '[rt-ac86u-wan-led] helper must be an absolute path\n' >&2; exit 2 ;; esac
+if [ ! -f "$helper" ] || [ ! -x "$helper" ]; then
+	printf '[rt-ac86u-wan-led] helper is unavailable: %s\n' "$helper" >&2
+	exit 1
+fi
+"$helper" "$mode"
+exit 0
+
+# <FILE>target/linux/bcm4908/base-files/etc/hotplug.d/iface/95-rt-ac86u-wan-led</FILE> - <DESC>Reconcile current WAN indicator state after relevant interface notifications.</DESC>
+# <VERS>END OF VERSION: 0.2.0</VERS>

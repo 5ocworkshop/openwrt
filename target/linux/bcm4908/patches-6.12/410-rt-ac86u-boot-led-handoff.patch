@@ -1,0 +1,265 @@
+# <FILE>target/linux/bcm4908/patches-6.12/410-rt-ac86u-boot-led-handoff.patch</FILE> - <DESC>Animate completed boot LED waypoints before normal policy.</DESC>
+# <VERS>VERSION: 0.3.0</VERS>
+# <WCTX>Complete the boot sequence asynchronously without delaying other services.</WCTX>
+# <CLOG>Accept one exact complete command that atomically finalizes healthy startup and starts the existing animation.</CLOG>
+
+--- a/drivers/leds/blink/leds-bcm63138.c
++++ b/drivers/leds/blink/leds-bcm63138.c
+@@ -10,6 +10,7 @@
+ #include <linux/errno.h>
+ #include <linux/ctype.h>
+ #include <linux/timer.h>
++#include <linux/string.h>
+ #include <linux/jiffies.h>
+ #include <linux/rtac86u_bootwaypoints.h>
+ #define RTAC86U_BOOTDIAG_PROVIDER
+@@ -64,6 +65,9 @@
+ 	bool bootdiag_panicked;
+ 	bool rootdiag;
+ 	bool bootzones;
++	bool zone_released;
++	unsigned int zone_finish_step;
++	unsigned long zone_finish_due;
+ 	struct timer_list zone_timer;
+ 	struct rtac86u_wp_snapshot zone_cached;
+ 	struct rtac86u_wp_snapshot zone_panic;
+@@ -229,8 +233,37 @@
+ 	}
+ }
+ 
++static bool rtac86u_zone_ready(const struct rtac86u_wp_snapshot *snapshot)
++{
++	return !snapshot->failed && snapshot->completed_mask == 0xf &&
++		snapshot->active_zone == 4 && snapshot->substep == 4;
++}
++
++/* Caller owns leds->lock. Only channels 16..21 belong to diagnostics. */
++static void rtac86u_zone_finish_render(struct bcm63138_leds *leds)
++{
++	struct bcm63138_led led = {};
++	unsigned int step = leds->zone_finish_step;
++	u32 mask = 0;
++
++	if (step >= 1 && step <= 4)
++		mask = GENMASK(19, 15 + step);
++	if ((step >= 1 && step <= 5) || step == 8)
++		mask |= BIT(21);
++	else if (step == 6)
++		mask |= BIT(20);
++	for (led.pin = 16; led.pin <= 21; led.pin++) {
++		bcm63138_leds_set_flash_rate(leds, &led, 0);
++		bcm63138_leds_set_bright(leds, &led, BCM63138_MAX_BRIGHTNESS);
++		bcm63138_leds_enable_led(leds, &led, mask & BIT(led.pin));
++	}
++}
++
+ static void rtac86u_zone_timer(struct timer_list *timer)
+ {
++	static const unsigned int finish_hold_ms[] = {
++		1000, 300, 250, 200, 150, 300, 300, 300,
++	};
+ 	struct bcm63138_leds *leds = from_timer(leds, timer, zone_timer);
+ 	struct rtac86u_wp_snapshot snapshot;
+ 	unsigned long flags;
+@@ -238,7 +271,32 @@
+ 
+ 	rtac86u_wp_snapshot(&snapshot);
+ 	spin_lock_irqsave(&leds->lock, flags);
+-	if (leds->bootzones && !leds->bootdiag_panicked) {
++	if (leds->bootzones && !leds->zone_released && !leds->bootdiag_panicked) {
++		if (leds->zone_finish_step) {
++			/* Refresh after taking the output lock, including final release. */
++			rtac86u_wp_snapshot(&snapshot);
++			if (!rtac86u_zone_ready(&snapshot)) {
++				leds->zone_finish_step = 0;
++			} else {
++				/* An older in-flight callback must not shorten this hold. */
++				if (time_before(jiffies, leds->zone_finish_due))
++					goto out;
++				if (++leds->zone_finish_step > 8) {
++					leds->zone_finish_step = 0;
++					rtac86u_zone_finish_render(leds);
++					leds->zone_released = true;
++					leds->bootdiag = false;
++				} else {
++					rtac86u_zone_finish_render(leds);
++					leds->zone_finish_due =
++						jiffies + msecs_to_jiffies(finish_hold_ms[
++							leds->zone_finish_step - 1]);
++					mod_timer(&leds->zone_timer,
++						  leds->zone_finish_due);
++				}
++				goto out;
++			}
++		}
+ 		if (snapshot.active_zone != leds->zone_cached.active_zone ||
+ 		    snapshot.substep != leds->zone_cached.substep ||
+ 		    snapshot.completed_mask != leds->zone_cached.completed_mask)
+@@ -252,6 +310,7 @@
+ 	}
+ 	if (rearm)
+ 		mod_timer(&leds->zone_timer, jiffies + msecs_to_jiffies(150));
++out:
+ 	spin_unlock_irqrestore(&leds->lock, flags);
+ }
+ 
+@@ -355,18 +414,87 @@
+ 	return 0;
+ }
+ 
++/*
++ * The controller timer renders completion frames asynchronously. Its output
++ * lock also serializes requests, normal callbacks, panic reclaim and removal.
++ */
++static int rtac86u_zone_release(struct bcm63138_leds *leds)
++{
++	struct rtac86u_wp_snapshot snapshot;
++	unsigned long flags;
++	int err = 0;
++
++	spin_lock_irqsave(&leds->lock, flags);
++	rtac86u_wp_snapshot(&snapshot);
++	if (!leds->bootzones) {
++		err = -EOPNOTSUPP;
++	} else if (leds->bootdiag_panicked || snapshot.failed) {
++		err = -EBUSY;
++	} else if (!leds->zone_released) {
++		if (!rtac86u_zone_ready(&snapshot)) {
++			err = -EBUSY;
++		} else if (!leds->zone_finish_step) {
++			leds->zone_finish_step = 1;
++			rtac86u_zone_finish_render(leds);
++			leds->zone_finish_due = jiffies + msecs_to_jiffies(1000);
++			mod_timer(&leds->zone_timer, leds->zone_finish_due);
++		}
++	}
++	spin_unlock_irqrestore(&leds->lock, flags);
++	return err;
++}
++
++/*
++ * One sysfs transaction validates core-owned startup facts and starts the
++ * existing sequence. Repeated healthy requests never replay facts or timers.
++ */
++static int rtac86u_zone_complete(struct bcm63138_leds *leds)
++{
++	struct rtac86u_wp_snapshot snapshot;
++	unsigned long flags;
++	int err = 0;
++
++	spin_lock_irqsave(&leds->lock, flags);
++	rtac86u_wp_snapshot(&snapshot);
++	if (!leds->bootzones) {
++		err = -EOPNOTSUPP;
++	} else if (leds->bootdiag_panicked || snapshot.failed) {
++		err = -EBUSY;
++	} else if (!leds->zone_released && !leds->zone_finish_step) {
++		if (!rtac86u_wp_finish_startup()) {
++			err = -EBUSY;
++		} else {
++			leds->zone_finish_step = 1;
++			rtac86u_zone_finish_render(leds);
++			leds->zone_finish_due = jiffies + msecs_to_jiffies(1000);
++			mod_timer(&leds->zone_timer, leds->zone_finish_due);
++		}
++	}
++	spin_unlock_irqrestore(&leds->lock, flags);
++	return err;
++}
++
+ static ssize_t boot_waypoint_show(struct device *dev,
+ 				 struct device_attribute *attr, char *buf)
+ {
+ 	struct rtac86u_wp_snapshot snapshot;
+-
++	struct bcm63138_leds *leds = dev_get_drvdata(dev);
++	unsigned long flags;
++	bool released, panicked;
++	unsigned int finish_step;
++
++	spin_lock_irqsave(&leds->lock, flags);
+ 	rtac86u_wp_snapshot(&snapshot);
++	released = leds->zone_released;
++	finish_step = leds->zone_finish_step;
++	panicked = leds->bootdiag_panicked;
++	spin_unlock_irqrestore(&leds->lock, flags);
+ 	return sysfs_emit(buf,
+ 		"completed=%x zone=%u step=%u failed=%u site=%u errno=%d root_dev=%u root_disk=%u "
+ 		"storage_seen=%x platform_health=%x nand_probe=%d nand_scan=%d "
+ 		"nand_id=%04x nand_id_len=%u mtd_register=%d ubi_lookup=%d "
+ 		"ubi_fallback=%d ubi_mtd=%u ubi_magic_result=%d ubi_magic_len=%u "
+-		"ubi_magic=%08x ubi_magic_found=%u ubi_attach=%d\n",
++		"ubi_magic=%08x ubi_magic_found=%u ubi_attach=%d released=%u panic=%u finishing=%u finish_step=%u\n",
+ 		snapshot.completed_mask, snapshot.active_zone, snapshot.substep,
+ 		snapshot.failed, snapshot.site, snapshot.error,
+ 		snapshot.root_dev, snapshot.root_disk,
+@@ -377,7 +475,8 @@
+ 		snapshot.ubi_fallback_result, snapshot.ubi_mtd_index,
+ 		snapshot.ubi_magic_result, snapshot.ubi_magic_length,
+ 		snapshot.ubi_magic, snapshot.ubi_magic_found,
+-		snapshot.ubi_attach_result);
++		snapshot.ubi_attach_result, released, panicked,
++		!!finish_step, finish_step);
+ }
+ 
+ static ssize_t boot_waypoint_store(struct device *dev,
+@@ -386,19 +485,33 @@
+ {
+ 	struct bcm63138_leds *leds = dev_get_drvdata(dev);
+ 	unsigned int zone, step, phase;
++	unsigned long flags;
+ 	int err;
+ 
+ 	if (!capable(CAP_SYS_ADMIN))
+ 		return -EPERM;
+ 	if (!READ_ONCE(leds->bootzones))
+ 		return -EOPNOTSUPP;
++	if ((count == 8 || (count == 9 && buf[8] == '\n')) &&
++	    sysfs_streq(buf, "complete")) {
++		err = rtac86u_zone_complete(leds);
++		return err ? err : count;
++	}
++	if ((count == 7 || (count == 8 && buf[7] == '\n')) &&
++	    sysfs_streq(buf, "release")) {
++		err = rtac86u_zone_release(leds);
++		return err ? err : count;
++	}
+ 	err = rtac86u_zone_parse(buf, count, &zone, &step, &phase);
+ 	if (err)
+ 		return err;
+-	if (READ_ONCE(leds->bootdiag_panicked))
+-		return -EBUSY;
+-	rtac86u_wp_step(zone, step, phase);
+-	return count;
++	spin_lock_irqsave(&leds->lock, flags);
++	if (leds->bootdiag_panicked || leds->zone_released || leds->zone_finish_step)
++		err = -EBUSY;
++	else
++		rtac86u_wp_step(zone, step, phase);
++	spin_unlock_irqrestore(&leds->lock, flags);
++	return err ? err : count;
+ }
+ static DEVICE_ATTR_RW(boot_waypoint);
+ 
+@@ -547,7 +655,10 @@
+ 		spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
+ 		return NOTIFY_DONE;
+ 	}
++	leds->zone_finish_step = 0;
+ 	leds->bootdiag_panicked = true;
++	leds->bootdiag = true;
++	leds->zone_released = false;
+ 	if (leds->bootzones) {
+ 		struct rtac86u_wp_snapshot frozen;
+ 
+@@ -632,6 +743,7 @@
+ 	spin_lock_irqsave(&leds->lock, flags);
+ 	zones = leds->bootzones;
+ 	leds->bootzones = false;
++	leds->zone_finish_step = 0;
+ 	spin_unlock_irqrestore(&leds->lock, flags);
+ 	if (zones)
+ 		del_timer_sync(&leds->zone_timer);
+
+# <FILE>target/linux/bcm4908/patches-6.12/410-rt-ac86u-boot-led-handoff.patch</FILE> - <DESC>Animate completed boot LED waypoints before normal policy.</DESC>
+# <VERS>END OF VERSION: 0.3.0</VERS>

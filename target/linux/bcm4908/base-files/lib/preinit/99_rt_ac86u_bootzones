@@ -1,0 +1,30 @@
+#!/bin/sh
+# <FILE>target/linux/bcm4908/base-files/lib/preinit/99_rt_ac86u_bootzones</FILE> - <DESC>Record the post-overlay userspace waypoint in boot-zone diagnostics.</DESC>
+# <VERS>VERSION: 0.1.1</VERS>
+# <WCTX>Preserve complete post-overlay sysfs commands under unbuffered stdout capture.</WCTX>
+# <CLOG>Write the checkpoint and failure log through configurable direct BusyBox echo calls.</CLOG>
+
+rt_ac86u_bootzones_overlay_returned() {
+	rtac86u_zone_compatible="${RTAC86U_DIAG_COMPATIBLE:-/sys/firmware/devicetree/base/compatible}"
+	rtac86u_zone_waypoint="${RTAC86U_DIAG_WAYPOINT:-/sys/class/leds/lan1/device/boot_waypoint}"
+	rtac86u_zone_kmsg="${RTAC86U_DIAG_KMSG:-/dev/kmsg}"
+	rtac86u_zone_busybox="${RTAC86U_DIAG_BUSYBOX:-/bin/busybox}"
+	[ -r "$rtac86u_zone_compatible" ] && [ -e "$rtac86u_zone_waypoint" ] || return 0
+	tr '\000' '\n' < "$rtac86u_zone_compatible" | grep -Fxq 'asus,rt-ac86u' || return 0
+	if ! "$rtac86u_zone_busybox" echo '4 2 1' > "$rtac86u_zone_waypoint"; then
+		"$rtac86u_zone_busybox" echo '<4>rt-ac86u-bootzones: post-mount waypoint write failed' > "$rtac86u_zone_kmsg" 2>/dev/null || :
+	fi
+	return 0
+}
+
+case "${1:-}" in
+--help)
+	printf '%s\n' 'Sourced OpenWrt hook: preinit_mount_root records boot waypoint4 2 1.' \
+		'RTAC86U_DIAG_COMPATIBLE, RTAC86U_DIAG_WAYPOINT and RTAC86U_DIAG_KMSG override test paths.' \
+		'RTAC86U_DIAG_BUSYBOX overrides /bin/busybox for atomic command and log writes.'
+	;;
+*) boot_hook_add preinit_mount_root rt_ac86u_bootzones_overlay_returned ;;
+esac
+
+# <FILE>target/linux/bcm4908/base-files/lib/preinit/99_rt_ac86u_bootzones</FILE> - <DESC>Record the post-overlay userspace waypoint in boot-zone diagnostics.</DESC>
+# <VERS>END OF VERSION: 0.1.1</VERS>

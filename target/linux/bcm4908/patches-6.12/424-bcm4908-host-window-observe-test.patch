@@ -1,0 +1,83 @@
+# <FILE>target/linux/bcm4908/patches-6.12/424-bcm4908-host-window-observe-test.patch</FILE> - <DESC>Default-off read-only BCM4908 host window snapshot.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Observe active PCIe host addressing before enumeration and before removal power-off.</WCTX>
+# <CLOG>Add a machine-scoped nine-register snapshot while preserving existing INTx and mapping behavior.</CLOG>
+--- a/drivers/pci/controller/pcie-brcmstb.c
++++ b/drivers/pci/controller/pcie-brcmstb.c
+@@ -288,10 +288,17 @@
+ 	int			num_memc;
+ 	u64			memc_size[PCIE_BRCM_MAX_MEMC];
+ 	u32			hw_rev;
++	u8			ac86u_host_snapshot_seen;
+ 	struct subdev_regulators *sr;
+ 	bool			ep_wakeup_capable;
+ 	const struct pcie_cfg_data	*cfg;
+ };
++
++static bool ac86u_probe_host_snapshot;
++module_param_named(ac86u_probe_host_snapshot, ac86u_probe_host_snapshot, bool, 0400);
++MODULE_PARM_DESC(ac86u_probe_host_snapshot, "Diagnostic read-only AC86U host windows");
++
++#include "ac86u_host_snapshot.h"
+ 
+ static inline bool is_bmips(const struct brcm_pcie *pcie)
+ {
+@@ -1672,6 +1679,8 @@
+ 	struct brcm_pcie *pcie = platform_get_drvdata(pdev);
+ 	struct pci_host_bridge *bridge = pci_host_bridge_from_priv(pcie);
+ 
++	brcm_pcie_ac86u_host_snapshot(pcie, true);
++
+ 	pci_stop_root_bus(bridge->bus);
+ 	pci_remove_root_bus(bridge->bus);
+ 	__brcm_pcie_remove(pcie);
+@@ -1940,6 +1949,8 @@
+ 
+ 	brcm_pcie_bcm4908_unmask_intx(pcie);
+ 
++	brcm_pcie_ac86u_host_snapshot(pcie, false);
++
+ 	ret = pci_host_probe(bridge);
+ 	if (!ret && !brcm_pcie_link_up(pcie))
+ 		ret = -ENODEV;
+--- a/drivers/pci/controller/ac86u_host_snapshot.h
++++ b/drivers/pci/controller/ac86u_host_snapshot.h
+@@ -0,0 +1,36 @@
++// <FILE>drivers/pci/controller/ac86u_host_snapshot.h</FILE> - <DESC>Scoped read-only BCM4908 host window snapshots.</DESC>
++// <VERS>VERSION: 0.1.0</VERS>
++// <WCTX>Observe active DMA addressing windows without changing controller mappings.</WCTX>
++// <CLOG>Read the nine documented host offsets once per probe and removal phase.</CLOG>
++static void brcm_pcie_ac86u_host_snapshot(struct brcm_pcie *pcie, bool removing)
++{
++	static const u32 offsets[] = {
++		PCIE_MISC_RC_BAR1_CONFIG_LO,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 4,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 8,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 12,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 16,
++		PCIE_MISC_RC_BAR1_CONFIG_LO + 20,
++		PCIE_MISC_MISC_CTRL,
++		PCIE_RC_CFG_VENDOR_VENDOR_SPECIFIC_REG1,
++		PCIE_MISC_UBUS_BAR1_CONFIG_REMAP,
++	};
++	u32 value[ARRAY_SIZE(offsets)];
++	u8 phase = removing ? BIT(1) : BIT(0);
++	unsigned int i;
++
++	if (!ac86u_probe_host_snapshot || pcie->cfg->soc_base != BCM4908 ||
++	    !of_machine_is_compatible("asus,rt-ac86u") ||
++	    (pcie->ac86u_host_snapshot_seen & phase))
++		return;
++
++	for (i = 0; i < ARRAY_SIZE(offsets); i++)
++		value[i] = readl(pcie->base + offsets[i]);
++	pcie->ac86u_host_snapshot_seen |= phase;
++	dev_info(pcie->dev,
++		 "AC86U_HOST_SNAPSHOT phase=%s bar1_lo=%#x bar1_hi=%#x bar2_lo=%#x bar2_hi=%#x bar3_lo=%#x bar3_hi=%#x misc_ctrl=%#x vendor_reg1=%#x bar1_remap=%#x\n",
++		 removing ? "remove" : "probe", value[0], value[1], value[2],
++		 value[3], value[4], value[5], value[6], value[7], value[8]);
++}
++// <FILE>drivers/pci/controller/ac86u_host_snapshot.h</FILE> - <DESC>Scoped read-only BCM4908 host window snapshots.</DESC>
++// <VERS>END OF VERSION: 0.1.0</VERS>
+# <FILE>target/linux/bcm4908/patches-6.12/424-bcm4908-host-window-observe-test.patch</FILE> - <DESC>Default-off read-only BCM4908 host window snapshot.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>

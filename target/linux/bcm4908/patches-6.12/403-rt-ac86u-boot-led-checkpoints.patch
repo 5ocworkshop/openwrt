@@ -1,0 +1,594 @@
+# <FILE>target/linux/bcm4908/patches-6.12/403-rt-ac86u-boot-led-checkpoints.patch</FILE> - <DESC>Board-scoped early boot LED checkpoints.</DESC>
+# <VERS>VERSION: 0.1.1</VERS>
+# <WCTX>Diagnose the inaccessible Linux 6.12 boot without a serial console.</WCTX>
+# <CLOG>Keep the UBI attachment wrapper available for built-in and modular UBI while adding boot LED checkpoints.</CLOG>
+
+--- a/drivers/leds/blink/leds-bcm63138.c
++++ b/drivers/leds/blink/leds-bcm63138.c
+@@ -3,6 +3,11 @@
+  * Copyright (C) 2021 Rafał Miłecki <rafal@milecki.pl>
+  */
+ #include <linux/delay.h>
++#include <linux/capability.h>
++#include <linux/notifier.h>
++#include <linux/panic_notifier.h>
++#define RTAC86U_BOOTDIAG_PROVIDER
++#include <linux/rtac86u_bootdiag.h>
+ #include <linux/io.h>
+ #include <linux/leds.h>
+ #include <linux/module.h>
+@@ -48,6 +53,12 @@
+ 	struct device *dev;
+ 	void __iomem *base;
+ 	spinlock_t lock;
++	bool bootdiag;
++	u32 bootdiag_available;
++	bool bootdiag_panicked;
++	unsigned int bootdiag_stage;
++	unsigned int bootdiag_phase;
++	struct notifier_block bootdiag_panic;
+ };
+ 
+ struct bcm63138_led {
+@@ -116,6 +127,195 @@
+ 	bcm63138_leds_update_bits(leds, BCM63138_SW_DATA, bit, value ? bit : 0);
+ }
+ 
++
++/*
++ * Diagnostic-only owner of the physical LAN1..4 and WAN indicators.
++ * Never bypass the existing controller lock; ordinary LED callbacks are
++ * suppressed for these channels while diagnostics owns them.
++ */
++static DEFINE_SPINLOCK(rtac86u_bootdiag_lock);
++static struct bcm63138_leds *rtac86u_bootdiag_controller;
++
++static u32 rtac86u_bootdiag_lan_mask(unsigned int stage)
++{
++	u32 mask = 0;
++	unsigned int bit;
++
++	for (bit = 0; bit < 4; bit++)
++		if (stage & BIT(bit))
++			mask |= BIT(19 - bit);
++	return mask;
++}
++
++static void rtac86u_bootdiag_render(struct bcm63138_leds *leds,
++				   unsigned int stage, unsigned int phase)
++{
++	struct bcm63138_led led = {};
++	u32 mask = rtac86u_bootdiag_lan_mask(stage);
++
++	if (phase != 1)
++		mask |= BIT(20);
++	if (phase != 0)
++		mask |= BIT(21);
++	for (led.pin = 16; led.pin <= 21; led.pin++) {
++		bcm63138_leds_set_flash_rate(leds, &led, 0);
++		bcm63138_leds_set_bright(leds, &led, BCM63138_MAX_BRIGHTNESS);
++		bcm63138_leds_enable_led(leds, &led, mask & BIT(led.pin));
++	}
++	leds->bootdiag_stage = stage;
++	leds->bootdiag_phase = phase;
++}
++
++void rtac86u_bootdiag_checkpoint(unsigned int stage, unsigned int phase)
++{
++	struct bcm63138_leds *leds;
++	unsigned long flags;
++	bool changed = false;
++
++	if (!stage || stage > 15 || phase > 2)
++		return;
++	spin_lock_irqsave(&rtac86u_bootdiag_lock, flags);
++	leds = rtac86u_bootdiag_controller;
++	if (leds) {
++		spin_lock(&leds->lock);
++		if (!leds->bootdiag_panicked) {
++			rtac86u_bootdiag_render(leds, stage, phase);
++			changed = true;
++		}
++		spin_unlock(&leds->lock);
++	}
++	spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
++	if (changed)
++		pr_info("rt-ac86u bootdiag: stage=%u phase=%u\n", stage, phase);
++}
++EXPORT_SYMBOL_GPL(rtac86u_bootdiag_checkpoint);
++
++void rtac86u_bootdiag_complete(unsigned int stage)
++{
++	struct bcm63138_leds *leds;
++	unsigned long flags;
++
++	spin_lock_irqsave(&rtac86u_bootdiag_lock, flags);
++	leds = rtac86u_bootdiag_controller;
++	if (leds) {
++		spin_lock(&leds->lock);
++		/* Preserve successful nested attachment or an explicit error. */
++		if (!leds->bootdiag_panicked && leds->bootdiag_stage == stage &&
++		    leds->bootdiag_phase == 0)
++			rtac86u_bootdiag_render(leds, stage, 1);
++		spin_unlock(&leds->lock);
++	}
++	spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
++}
++
++EXPORT_SYMBOL_GPL(rtac86u_bootdiag_complete);
++
++static int rtac86u_bootdiag_panic(struct notifier_block *nb,
++				 unsigned long event, void *data)
++{
++	struct bcm63138_leds *leds = container_of(nb, struct bcm63138_leds,
++						 bootdiag_panic);
++	struct bcm63138_led led = { .pin = 20 };
++	unsigned long flags;
++
++	if (!spin_trylock_irqsave(&rtac86u_bootdiag_lock, flags))
++		return NOTIFY_DONE;
++	if (!spin_trylock(&leds->lock)) {
++		spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
++		return NOTIFY_DONE;
++	}
++	leds->bootdiag_panicked = true;
++	bcm63138_leds_set_bright(leds, &led, BCM63138_MAX_BRIGHTNESS);
++	bcm63138_leds_enable_led(leds, &led, BCM63138_MAX_BRIGHTNESS);
++	bcm63138_leds_set_flash_rate(leds, &led, 6);
++	led.pin = 21;
++	bcm63138_leds_enable_led(leds, &led, LED_OFF);
++	spin_unlock(&leds->lock);
++	spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
++	return NOTIFY_DONE;
++}
++
++static ssize_t boot_stage_show(struct device *dev,
++			       struct device_attribute *attr, char *buf)
++{
++	struct bcm63138_leds *leds = dev_get_drvdata(dev);
++	unsigned long flags;
++	unsigned int stage, phase;
++	bool panicked;
++
++	spin_lock_irqsave(&leds->lock, flags);
++	stage = leds->bootdiag_stage;
++	phase = leds->bootdiag_phase;
++	panicked = leds->bootdiag_panicked;
++	spin_unlock_irqrestore(&leds->lock, flags);
++	return sysfs_emit(buf, "stage=%u phase=%u panic=%u\n", stage, phase, panicked);
++}
++
++static ssize_t boot_stage_store(struct device *dev,
++				struct device_attribute *attr,
++				const char *buf, size_t count)
++{
++	unsigned int stage;
++	int err;
++
++	if (!capable(CAP_SYS_ADMIN))
++		return -EPERM;
++	err = kstrtouint(buf, 10, &stage);
++	if (err)
++		return err;
++	if (stage != 13 && stage != 14)
++		return -EINVAL;
++	rtac86u_bootdiag_checkpoint(stage, 1);
++	return count;
++}
++static DEVICE_ATTR_RW(boot_stage);
++
++static void rtac86u_bootdiag_cleanup(void *data)
++{
++	struct bcm63138_leds *leds = data;
++	unsigned long flags;
++
++	atomic_notifier_chain_unregister(&panic_notifier_list,
++					 &leds->bootdiag_panic);
++	spin_lock_irqsave(&rtac86u_bootdiag_lock, flags);
++	rtac86u_bootdiag_controller = NULL;
++	spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
++	device_remove_file(leds->dev, &dev_attr_boot_stage);
++}
++
++static int rtac86u_bootdiag_start(struct bcm63138_leds *leds)
++{
++	unsigned long flags;
++	int err;
++
++	if (!of_machine_is_compatible("asus,rt-ac86u") ||
++	    !of_property_read_bool(of_root, "asus,rt-ac86u-bootdiag"))
++		return 0;
++	if ((leds->bootdiag_available & GENMASK(21, 16)) != GENMASK(21, 16))
++		return dev_err_probe(leds->dev, -ENODEV, "Diagnostic LED pins unavailable\n");
++	err = device_create_file(leds->dev, &dev_attr_boot_stage);
++	if (err)
++		return err;
++	leds->bootdiag_panic.notifier_call = rtac86u_bootdiag_panic;
++	err = atomic_notifier_chain_register(&panic_notifier_list,
++					    &leds->bootdiag_panic);
++	if (err) {
++		device_remove_file(leds->dev, &dev_attr_boot_stage);
++		return err;
++	}
++	spin_lock_irqsave(&rtac86u_bootdiag_lock, flags);
++	spin_lock(&leds->lock);
++	leds->bootdiag = true;
++	rtac86u_bootdiag_render(leds, 1, 1);
++	rtac86u_bootdiag_controller = leds;
++	spin_unlock(&leds->lock);
++	spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
++	err = devm_add_action_or_reset(leds->dev, rtac86u_bootdiag_cleanup, leds);
++	if (!err)
++		dev_info(leds->dev, "rt-ac86u bootdiag: stage=1 phase=1\n");
++	return err;
++}
++
+ /*
+  * API callbacks
+  */
+@@ -128,6 +328,10 @@
+ 	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&leds->lock, flags);
++	if (leds->bootdiag && led->pin >= 16 && led->pin <= 21) {
++		spin_unlock_irqrestore(&leds->lock, flags);
++		return;
++	}
+ 
+ 	bcm63138_leds_enable_led(leds, led, value);
+ 	if (!value)
+@@ -180,6 +384,10 @@
+ 	}
+ 
+ 	spin_lock_irqsave(&leds->lock, flags);
++	if (leds->bootdiag && led->pin >= 16 && led->pin <= 21) {
++		spin_unlock_irqrestore(&leds->lock, flags);
++		return 0;
++	}
+ 
+ 	bcm63138_leds_enable_led(leds, led, BCM63138_MAX_BRIGHTNESS);
+ 	bcm63138_leds_set_flash_rate(leds, led, value);
+@@ -247,6 +455,8 @@
+ 	bcm63138_leds_update_bits(leds, BCM63138_HW_LED_EN, bit, 0);
+ 	bcm63138_leds_set_flash_rate(leds, led, 0);
+ 	bcm63138_leds_enable_led(leds, led, led->cdev.brightness);
++	if (!IS_ERR(pinctrl))
++		leds->bootdiag_available |= bit;
+ 
+ 	return;
+ 
+@@ -284,7 +494,8 @@
+ 		bcm63138_leds_create_led(leds, child);
+ 	}
+ 
+-	return 0;
++	platform_set_drvdata(pdev, leds);
++	return rtac86u_bootdiag_start(leds);
+ }
+ 
+ static const struct of_device_id bcm63138_leds_of_match_table[] = {
+--- a/drivers/mtd/nand/raw/brcmnand/bcmbca_nand.c
++++ b/drivers/mtd/nand/raw/brcmnand/bcmbca_nand.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <linux/device.h>
++#include <linux/rtac86u_bootdiag.h>
+ #include <linux/io.h>
+ #include <linux/ioport.h>
+ #include <linux/module.h>
+@@ -82,7 +83,7 @@
+ 		memcpy_fromio((void *)buffer, flash_cache, fc_words * 4);
+ }
+ 
+-static int bcmbca_nand_probe(struct platform_device *pdev)
++static int bcmbca_nand_probe_without_bootdiag(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct bcmbca_nand_soc *priv;
+@@ -106,6 +107,17 @@
+ 	return brcmnand_probe(pdev, soc);
+ }
+ 
++static int bcmbca_nand_probe(struct platform_device *pdev)
++{
++	int ret;
++
++	rtac86u_bootdiag_checkpoint(3, 0);
++	ret = bcmbca_nand_probe_without_bootdiag(pdev);
++	rtac86u_bootdiag_checkpoint(3, ret ? 2 : 1);
++	return ret;
++}
++
++
+ static const struct of_device_id bcmbca_nand_of_match[] = {
+ 	{ .compatible = "brcm,nand-bcm63138" },
+ 	{},
+--- a/drivers/mtd/ubi/build.c
++++ b/drivers/mtd/ubi/build.c
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include <linux/err.h>
++#include <linux/rtac86u_bootdiag.h>
+ #include <linux/module.h>
+ #include <linux/moduleparam.h>
+ #include <linux/stringify.h>
+@@ -1060,6 +1061,7 @@
+ 
+ 	ubi_devices[ubi_num] = ubi;
+ 	ubi_notify_all(ubi, UBI_VOLUME_ADDED, NULL);
++	rtac86u_bootdiag_checkpoint(7, 1);
+ 	return ubi_num;
+ 
+ out_debugfs:
+@@ -1283,8 +1285,10 @@
+ 	if (IS_ERR(mtd))
+ 		mtd = open_mtd_device("data");
+ 
+-	if (IS_ERR(mtd))
++	if (IS_ERR(mtd)) {
++		rtac86u_bootdiag_checkpoint(6, 2);
+ 		return;
++	}
+ 
+ 	/* skip "linux,ubi" mtd as it has already been attached */
+ 	np = mtd_get_of_node(mtd);
+@@ -1297,6 +1301,7 @@
+ 			offset += mtd->erasesize;
+ 
+ 			if (offset > mtd->size) {
++				rtac86u_bootdiag_checkpoint(6, 2);
+ 				pr_err("UBI error: Failed to find a non-bad "
+ 				       "block on mtd%d\n", mtd->index);
+ 				goto cleanup;
+@@ -1306,12 +1311,14 @@
+ 	/* check if the read from flash was successful */
+ 	err = mtd_read(mtd, offset, 4, &len, (void *) magic);
+ 	if ((err && !mtd_is_bitflip(err)) || len != 4) {
++		rtac86u_bootdiag_checkpoint(6, 2);
+ 		pr_err("UBI error: unable to read from mtd%d\n", mtd->index);
+ 		goto cleanup;
+ 	}
+ 
+ 	/* check for a valid ubi magic */
+ 	if (strncmp(magic, "UBI#", 4)) {
++		rtac86u_bootdiag_checkpoint(6, 2);
+ 		pr_err("UBI error: no valid UBI magic found inside mtd%d\n", mtd->index);
+ 		goto cleanup;
+ 	}
+@@ -1328,6 +1335,7 @@
+ 	err = ubi_attach_mtd_dev(mtd, UBI_DEV_NUM_AUTO, 0, 0, false, false);
+ 	mutex_unlock(&ubi_devices_mutex);
+ 	if (err < 0) {
++		rtac86u_bootdiag_checkpoint(6, 2);
+ 		pr_err("UBI error: cannot attach mtd%d\n", mtd->index);
+ 		goto cleanup;
+ 	}
+@@ -1338,7 +1346,7 @@
+ 	put_mtd_device(mtd);
+ }
+ 
+-static int __init ubi_init_attach(void)
++static int __init ubi_init_attach_without_bootdiag(void)
+ {
+ 	int err, i, k;
+ 
+@@ -1352,6 +1360,7 @@
+ 		mtd = open_mtd_device(p->name);
+ 		if (IS_ERR(mtd)) {
+ 			err = PTR_ERR(mtd);
++			rtac86u_bootdiag_checkpoint(6, 2);
+ 			pr_err("UBI error: cannot open mtd %s, error %d\n",
+ 			       p->name, err);
+ 			/* See comment below re-ubi_is_module(). */
+@@ -1407,6 +1416,18 @@
+ 	return err;
+ }
+-#ifndef CONFIG_MTD_UBI_MODULE
++static int __init ubi_init_attach(void)
++{
++	int ret;
++
++	rtac86u_bootdiag_checkpoint(6, 0);
++	ret = ubi_init_attach_without_bootdiag();
++	if (ret)
++		rtac86u_bootdiag_checkpoint(6, 2);
++	else
++		rtac86u_bootdiag_complete(6);
++	return ret;
++}
++#ifndef CONFIG_MTD_UBI_MODULE
+ late_initcall(ubi_init_attach);
+ #endif
+ 
+--- a/drivers/net/dsa/bcm_sf2.c
++++ b/drivers/net/dsa/bcm_sf2.c
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include <linux/list.h>
++#include <linux/rtac86u_bootdiag.h>
+ #include <linux/module.h>
+ #include <linux/netdevice.h>
+ #include <linux/interrupt.h>
+@@ -1360,7 +1361,7 @@
+ };
+ MODULE_DEVICE_TABLE(of, bcm_sf2_of_match);
+ 
+-static int bcm_sf2_sw_probe(struct platform_device *pdev)
++static int bcm_sf2_sw_probe_without_bootdiag(struct platform_device *pdev)
+ {
+ 	const char *reg_names[BCM_SF2_REGS_NUM] = BCM_SF2_REGS_NAME;
+ 	struct device_node *dn = pdev->dev.of_node;
+@@ -1574,6 +1575,17 @@
+ 	return ret;
+ }
+ 
++static int bcm_sf2_sw_probe(struct platform_device *pdev)
++{
++	int ret;
++
++	rtac86u_bootdiag_checkpoint(4, 0);
++	ret = bcm_sf2_sw_probe_without_bootdiag(pdev);
++	rtac86u_bootdiag_checkpoint(4, ret ? 2 : 1);
++	return ret;
++}
++
++
+ static void bcm_sf2_sw_remove(struct platform_device *pdev)
+ {
+ 	struct bcm_sf2_priv *priv = platform_get_drvdata(pdev);
+--- a/drivers/net/ethernet/broadcom/bcm4908_enet.c
++++ b/drivers/net/ethernet/broadcom/bcm4908_enet.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <linux/delay.h>
++#include <linux/rtac86u_bootdiag.h>
+ #include <linux/etherdevice.h>
+ #include <linux/if_vlan.h>
+ #include <linux/interrupt.h>
+@@ -706,7 +707,7 @@
+ 	.ndo_change_mtu = bcm4908_enet_change_mtu,
+ };
+ 
+-static int bcm4908_enet_probe(struct platform_device *pdev)
++static int bcm4908_enet_probe_without_bootdiag(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct net_device *netdev;
+@@ -768,6 +769,17 @@
+ 	return err;
+ }
+ 
++static int bcm4908_enet_probe(struct platform_device *pdev)
++{
++	int ret;
++
++	rtac86u_bootdiag_checkpoint(5, 0);
++	ret = bcm4908_enet_probe_without_bootdiag(pdev);
++	rtac86u_bootdiag_checkpoint(5, ret ? 2 : 1);
++	return ret;
++}
++
++
+ static void bcm4908_enet_remove(struct platform_device *pdev)
+ {
+ 	struct bcm4908_enet *enet = platform_get_drvdata(pdev);
+--- a/drivers/pmdomain/bcm/bcm-pmb.c
++++ b/drivers/pmdomain/bcm/bcm-pmb.c
+@@ -6,6 +6,7 @@
+ 
+ #include <dt-bindings/soc/bcm-pmb.h>
+ #include <linux/io.h>
++#include <linux/rtac86u_bootdiag.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+@@ -270,7 +271,7 @@
+ 	}
+ }
+ 
+-static int bcm_pmb_probe(struct platform_device *pdev)
++static int bcm_pmb_probe_without_bootdiag(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	const struct bcm_pmb_pd_data *table;
+@@ -333,6 +334,17 @@
+ 	return 0;
+ }
+ 
++static int bcm_pmb_probe(struct platform_device *pdev)
++{
++	int ret;
++
++	rtac86u_bootdiag_checkpoint(2, 0);
++	ret = bcm_pmb_probe_without_bootdiag(pdev);
++	rtac86u_bootdiag_checkpoint(2, ret ? 2 : 1);
++	return ret;
++}
++
++
+ static const struct bcm_pmb_pd_data bcm_pmb_bcm4908_data[] = {
+ 	{ .name = "pcie2", .id = BCM_PMB_PCIE2, .bus = 0, .device = 2, },
+ 	{ .name = "pcie0", .id = BCM_PMB_PCIE0, .bus = 1, .device = 14, },
+--- /dev/null
++++ b/include/linux/rtac86u_bootdiag.h
+@@ -0,0 +1,23 @@
++/* <FILE>include/linux/rtac86u_bootdiag.h</FILE> - <DESC>Opt-in RT-AC86U boot checkpoint interface.</DESC> */
++/* <VERS>VERSION: 0.1.1</VERS> */
++/* <WCTX>Expose diagnostic checkpoints without requiring the LED driver on other platforms.</WCTX> */
++/* <CLOG>Declare the stage/phase contract and disabled-driver no-op helpers.</CLOG> */
++#ifndef _LINUX_RTAC86U_BOOTDIAG_H
++#define _LINUX_RTAC86U_BOOTDIAG_H
++
++#include <linux/kconfig.h>
++
++#if IS_BUILTIN(CONFIG_LEDS_BCM63138) || defined(RTAC86U_BOOTDIAG_PROVIDER)
++/* Stage 1..15, phase 0: entered, 1: completed, 2: returned error. */
++void rtac86u_bootdiag_checkpoint(unsigned int stage, unsigned int phase);
++/* Complete only an unchanged entry marker; retain nested successes/errors. */
++void rtac86u_bootdiag_complete(unsigned int stage);
++#else
++static inline void rtac86u_bootdiag_checkpoint(unsigned int stage,
++					     unsigned int phase) {}
++static inline void rtac86u_bootdiag_complete(unsigned int stage) {}
++#endif
++
++#endif
++/* <FILE>include/linux/rtac86u_bootdiag.h</FILE> - <DESC>Opt-in RT-AC86U boot checkpoint interface.</DESC> */
++/* <VERS>END OF VERSION: 0.1.1</VERS> */
+--- a/init/do_mounts.c
++++ b/init/do_mounts.c
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ #include <linux/module.h>
++#include <linux/rtac86u_bootdiag.h>
+ #include <linux/sched.h>
+ #include <linux/ctype.h>
+ #include <linux/fd.h>
+@@ -492,6 +493,7 @@
+  */
+ void __init prepare_namespace(void)
+ {
++	rtac86u_bootdiag_checkpoint(8, 0);
+ 	if (root_delay) {
+ 		printk(KERN_INFO "Waiting %d sec before mounting root device...\n",
+ 		       root_delay);
+@@ -517,11 +519,14 @@
+ 
+ 	if (root_wait)
+ 		wait_for_root(saved_root_name);
++	rtac86u_bootdiag_checkpoint(9, 0);
+ 	mount_root(saved_root_name);
++	rtac86u_bootdiag_checkpoint(10, 1);
+ out:
+ 	devtmpfs_mount();
+ 	init_mount(".", "/", NULL, MS_MOVE, NULL);
+ 	init_chroot(".");
++	rtac86u_bootdiag_checkpoint(11, 1);
+ }
+ 
+ static bool is_tmpfs;
+--- a/init/main.c
++++ b/init/main.c
+@@ -13,6 +13,7 @@
+ #define DEBUG		/* Enable initcall_debug */
+ 
+ #include <linux/types.h>
++#include <linux/rtac86u_bootdiag.h>
+ #include <linux/extable.h>
+ #include <linux/module.h>
+ #include <linux/proc_fs.h>
+@@ -1382,6 +1383,7 @@
+ 	pr_debug("  with environment:\n");
+ 	for (p = envp_init; *p; p++)
+ 		pr_debug("    %s\n", *p);
++	rtac86u_bootdiag_checkpoint(12, 0);
+ 	return kernel_execve(init_filename, argv_init, envp_init);
+ }
+ 
+
+# <FILE>target/linux/bcm4908/patches-6.12/403-rt-ac86u-boot-led-checkpoints.patch</FILE> - <DESC>Board-scoped early boot LED checkpoints.</DESC>
+# <VERS>END OF VERSION: 0.1.1</VERS>

@@ -1,0 +1,178 @@
+# <FILE>target/linux/bcm4908/patches-6.12/426-rt-ac86u-led-state-interface.patch</FILE> - <DESC>Batch diagnostic LED state and suppress unchanged register accesses.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Keep diagnostic semantics behind a low-traffic controller boundary.</WCTX>
+# <CLOG>Configure the owned bank once and merge changed patterns into current SW_DATA.</CLOG>
+
+--- a/drivers/leds/blink/leds-bcm63138.c
++++ b/drivers/leds/blink/leds-bcm63138.c
+@@ -61,6 +61,8 @@
+ 	void __iomem *base;
+ 	spinlock_t lock;
+ 	bool bootdiag;
++	u32 diag_control;
++	u32 diag_output;
+ 	u32 bootdiag_available;
+ 	bool bootdiag_panicked;
+ 	bool rootdiag;
+@@ -115,6 +117,51 @@
+  * Helpers
+  */
+ 
++/*
++ * Diagnostic patterns share one hardware boundary under leds->lock.
++ * A zero control mask invalidates both configuration and output knowledge.
++ */
++static void rtac86u_diag_invalidate(struct bcm63138_leds *leds)
++{
++	leds->diag_control = 0;
++}
++
++static void rtac86u_diag_apply(struct bcm63138_leds *leds, u32 mask, bool panic)
++{
++	u32 control = GENMASK(21, 16);
++	u32 update, desired, before, after;
++	bool configure;
++
++	/* Red WAN keeps its independent hardware flash during panic replays. */
++	if (panic)
++		control &= ~BIT(20);
++	desired = mask & control;
++	configure = leds->diag_control != control;
++	if (!configure && leds->diag_output == desired)
++		return;
++
++	update = control;
++	if (configure) {
++		/* Pins 16..21 occupy only the low six nibbles of bank three. */
++		bcm63138_leds_update_bits(leds, BCM63138_FLASH_RATE_CTRL3,
++					  GENMASK(23, 0), panic ? 6 << 16 : 0);
++		bcm63138_leds_update_bits(leds, BCM63138_BRIGHT_CTRL3,
++					  GENMASK(23, 0), 0x999999);
++		if (panic)
++			update |= BIT(20);
++	}
++
++	/* Merge CURRENT unrelated output bits, never a cached whole register. */
++	before = bcm63138_leds_read(leds, BCM63138_SW_DATA);
++	after = (before & ~update) | desired;
++	if (configure && panic)
++		after |= BIT(20);
++	if (after != before)
++		bcm63138_leds_write(leds, BCM63138_SW_DATA, after);
++	leds->diag_control = control;
++	leds->diag_output = desired;
++}
++
+ static void bcm63138_leds_set_flash_rate(struct bcm63138_leds *leds,
+ 					 struct bcm63138_led *led,
+ 					 u8 value)
+@@ -169,18 +216,13 @@
+ static void rtac86u_bootdiag_render(struct bcm63138_leds *leds,
+ 				   unsigned int stage, unsigned int phase)
+ {
+-	struct bcm63138_led led = {};
+ 	u32 mask = rtac86u_bootdiag_lan_mask(stage);
+ 
+ 	if (phase != 1)
+ 		mask |= BIT(20);
+-	if (phase != 0)
++	if (phase != 0 && !leds->bootdiag_panicked)
+ 		mask |= BIT(21);
+-	for (led.pin = 16; led.pin <= 21; led.pin++) {
+-		bcm63138_leds_set_flash_rate(leds, &led, 0);
+-		bcm63138_leds_set_bright(leds, &led, BCM63138_MAX_BRIGHTNESS);
+-		bcm63138_leds_enable_led(leds, &led, mask & BIT(led.pin));
+-	}
++	rtac86u_diag_apply(leds, mask, leds->bootdiag_panicked);
+ 	leds->bootdiag_stage = stage;
+ 	leds->bootdiag_phase = phase;
+ }
+@@ -215,22 +257,7 @@
+ /* Caller owns leds->lock. Keep the white WAN anchor on, also in panic. */
+ static void rtac86u_zone_render(struct bcm63138_leds *leds, u32 mask, bool panic)
+ {
+-	struct bcm63138_led led = {};
+-
+-	for (led.pin = 16; led.pin <= 19; led.pin++) {
+-		bcm63138_leds_set_flash_rate(leds, &led, 0);
+-		bcm63138_leds_set_bright(leds, &led, BCM63138_MAX_BRIGHTNESS);
+-		bcm63138_leds_enable_led(leds, &led, mask & BIT(led.pin));
+-	}
+-	led.pin = 21;
+-	bcm63138_leds_set_flash_rate(leds, &led, 0);
+-	bcm63138_leds_set_bright(leds, &led, BCM63138_MAX_BRIGHTNESS);
+-	bcm63138_leds_enable_led(leds, &led, BCM63138_MAX_BRIGHTNESS);
+-	if (!panic) {
+-		led.pin = 20;
+-		bcm63138_leds_set_flash_rate(leds, &led, 0);
+-		bcm63138_leds_enable_led(leds, &led, LED_OFF);
+-	}
++	rtac86u_diag_apply(leds, mask | BIT(21), panic);
+ }
+ 
+ static bool rtac86u_zone_ready(const struct rtac86u_wp_snapshot *snapshot)
+@@ -242,7 +269,6 @@
+ /* Caller owns leds->lock. Only channels 16..21 belong to diagnostics. */
+ static void rtac86u_zone_finish_render(struct bcm63138_leds *leds)
+ {
+-	struct bcm63138_led led = {};
+ 	unsigned int step = leds->zone_finish_step;
+ 	u32 mask = 0;
+ 
+@@ -252,11 +278,7 @@
+ 		mask |= BIT(21);
+ 	else if (step == 6)
+ 		mask |= BIT(20);
+-	for (led.pin = 16; led.pin <= 21; led.pin++) {
+-		bcm63138_leds_set_flash_rate(leds, &led, 0);
+-		bcm63138_leds_set_bright(leds, &led, BCM63138_MAX_BRIGHTNESS);
+-		bcm63138_leds_enable_led(leds, &led, mask & BIT(led.pin));
+-	}
++	rtac86u_diag_apply(leds, mask, false);
+ }
+ 
+ static void rtac86u_zone_timer(struct timer_list *timer)
+@@ -284,6 +306,7 @@
+ 				if (++leds->zone_finish_step > 8) {
+ 					leds->zone_finish_step = 0;
+ 					rtac86u_zone_finish_render(leds);
++					rtac86u_diag_invalidate(leds);
+ 					leds->zone_released = true;
+ 					leds->bootdiag = false;
+ 				} else {
+@@ -655,6 +678,8 @@
+ 		spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
+ 		return NOTIFY_DONE;
+ 	}
++	if (!leds->bootdiag_panicked)
++		rtac86u_diag_invalidate(leds);
+ 	leds->zone_finish_step = 0;
+ 	leds->bootdiag_panicked = true;
+ 	leds->bootdiag = true;
+@@ -685,12 +710,9 @@
+ 		bcm63138_leds_set_flash_rate(leds, &led, 6);
+ 		led.pin = 20;
+ 	}
+-	bcm63138_leds_set_bright(leds, &led, BCM63138_MAX_BRIGHTNESS);
+-	bcm63138_leds_enable_led(leds, &led, BCM63138_MAX_BRIGHTNESS);
+-	bcm63138_leds_set_flash_rate(leds, &led, 6);
+-	led.pin = 21;
+-	bcm63138_leds_enable_led(leds, &led,
+-		leds->bootzones ? BCM63138_MAX_BRIGHTNESS : LED_OFF);
++	if (!leds->bootzones && !(leds->rootdiag && leds->rootdiag_fatal))
++		rtac86u_diag_apply(leds,
++			rtac86u_bootdiag_lan_mask(leds->bootdiag_stage), true);
+ 	spin_unlock(&leds->lock);
+ 	spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
+ 	return NOTIFY_DONE;
+@@ -743,6 +765,7 @@
+ 	spin_lock_irqsave(&leds->lock, flags);
+ 	zones = leds->bootzones;
+ 	leds->bootzones = false;
++	rtac86u_diag_invalidate(leds);
+ 	leds->zone_finish_step = 0;
+ 	spin_unlock_irqrestore(&leds->lock, flags);
+ 	if (zones)
+
+# <FILE>target/linux/bcm4908/patches-6.12/426-rt-ac86u-led-state-interface.patch</FILE> - <DESC>Batch diagnostic LED state and suppress unchanged register accesses.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>

@@ -1,0 +1,34 @@
+# <FILE>package/kernel/mac80211/patches/brcm/871-brcmfmac-preserve-firmware-buffer.patch</FILE> - <DESC>Keep country-code filtering off firmware loader-owned buffers.</DESC>
+# <VERS>VERSION: 0.1.1</VERS>
+# <WCTX>Firmware sysfs fallback data may be mapped read-only and shared between requests.</WCTX>
+# <CLOG>Correct the final source context so the private NVRAM copy patch applies with zero fuzz.</CLOG>
+
+Subject: brcmfmac: preserve firmware loader-owned NVRAM buffers
+
+The country-code filter introduced by patch 870-02 writes into fw->data.
+Firmware loader buffers are const, and the sysfs fallback maps them read-only.
+Use a private working copy for firmware-sourced NVRAM, preserving the existing
+filter and strip semantics. Reuse kfree_nvram ownership for normal cleanup;
+allocation failure releases the firmware exactly once and returns -ENOMEM.
+BCM47xx and EFI sources retain their existing ownership and cleanup paths.
+
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/firmware.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/firmware.c
+@@ -554,8 +554,13 @@ static int brcmf_fw_request_nvram_done(const struct firmware *fw, void *ctx)
+ 	cur = &fwctx->req->items[fwctx->curpos];
+ 
+ 	if (fw && fw->data) {
+-		data = (u8 *)fw->data;
++		data = kmemdup(fw->data, fw->size, GFP_KERNEL);
++		if (!data) {
++			release_firmware(fw);
++			return -ENOMEM;
++		}
++		kfree_nvram = true;
+ 		data_len = fw->size;
+ 	} else {
+ 		data = bcm47xx_nvram_get_contents(&data_len);
+ 		if (data) {
+
+# <FILE>package/kernel/mac80211/patches/brcm/871-brcmfmac-preserve-firmware-buffer.patch</FILE> - <DESC>Keep country-code filtering off firmware loader-owned buffers.</DESC>
+# <VERS>END OF VERSION: 0.1.1</VERS>

@@ -34,6 +34,7 @@ platform_expected_image() {
 
 	case "$machine" in
 		asus,gt-ac5300)			echo "asus GT-AC5300";;
+		asus,rt-ac86u)			echo "asus RT-AC86U";;
 		netgear,r8000p)			echo "chk U12H359T00_NETGEAR";;
 		tplink,archer-c2300-v1)		echo "";;
 	esac

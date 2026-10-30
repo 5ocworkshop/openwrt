@@ -1,7 +1,7 @@
 <!-- <FILE>contrib/ac86u/README.md</FILE> - <DESC>Portable AC86U build environment and CLI contracts.</DESC> -->
-<!-- <VERS>VERSION: 0.1.0</VERS> -->
+<!-- <VERS>VERSION: 0.1.1</VERS> -->
 <!-- <WCTX>Keep the public environment independent of private build hosts and hardware changes.</WCTX> -->
-<!-- <CLOG>Define seed, native build, identity and monitoring ownership before implementation.</CLOG> -->
+<!-- <CLOG>Link the integrated hardware regression prerequisites and separate native ucode acceptance.</CLOG> -->
 
 # AC86U environment
 
@@ -23,7 +23,7 @@ Architecture checklist: only contrib/ac86u owns this environment; dependencies p
 
 Install normal upstream OpenWrt build prerequisites and update/install the pinned release feeds using scripts/feeds before configuring. From the source root run make -f contrib/ac86u/Makefile help. configure starts only when the hardware profile exists and refuses an existing .config. firmware verifies the normalized single-device selection, stamps the identity, normalizes config again and runs native make with preserved caches. JOBS defaults to 1; set it to the scheduler allocation. RUN_DIR defaults to a unique UTC path under .port/runs; explicit directories must be new. BUILD_ID is optional; use a previous exact ID plus a fresh RUN_DIR for deliberate reproduction. BANNER_LABEL defaults to ASUS RT-AC86U 25.12.6 RC1-public. HTTPS is optional: choose packages deliberately after configuration.
 
-Run make -f contrib/ac86u/Makefile test inside the admitted job. The Kconfig normalization test requires scripts/config/conf and reports a skip until upstream configuration tools exist. No firmware build or router interaction forms part of the environment test suite.
+Run make -f contrib/ac86u/Makefile test inside the admitted job. The Kconfig normalization test requires scripts/config/conf and reports a skip until upstream configuration tools exist. The suite also includes the hardware regressions documented in [tests/README.md](tests/README.md); the critical read-only-buffer test requires an explicit prepared pre-871 source baseline and fails clearly when that prerequisite is missing. Native ucode acceptance is a separate documented command requiring its host interpreter/modules. These tests use isolated host fixtures and do not flash or contact a router.
 
 <!-- <FILE>contrib/ac86u/README.md</FILE> - <DESC>Portable AC86U build environment and CLI contracts.</DESC> -->
-<!-- <VERS>END OF VERSION: 0.1.0</VERS> -->
+<!-- <VERS>END OF VERSION: 0.1.1</VERS> -->

@@ -1,0 +1,224 @@
+#!/bin/sh
+# <FILE>target/linux/bcm4908/base-files/usr/libexec/ac86u-radio-recover</FILE> - <DESC>Bounded AC86U stock-radio startup recovery.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Recover failed unbound startup targets without disturbing initializing or healthy radios.</WCTX>
+# <CLOG>Add scoped one-shot bind retries with a finite deadline and atomic RAM status.</CLOG>
+set -eu
+sysfs=/sys
+board_file=/tmp/sysinfo/board_name
+status_root=/tmp/ac86u-radio-recover
+clock_root=
+max_seconds=120
+settle_seconds=5
+dry_run=0
+run_dir=
+own_lock=0
+bind_pid=
+done=0
+state0=unknown state1=unknown attempt0=0 attempt1=0 due0=0 due1=0
+
+log() { printf '[ac86u-radio-recover] %s\n' "$*" >&2; }
+clock_now() {
+	if [ -n "$clock_root" ]; then
+		IFS= read -r NOW < "$clock_root/now" || :
+	else
+		read -r NOW _unused < /proc/uptime
+		NOW=${NOW%%.*}
+	fi
+	case "$NOW" in ''|*[!0-9]*) finish failed invalid_clock 1 ;; esac
+}
+publish() {
+	stage=$1 reason=$2 terminal=$3
+	utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+	printf '{"pid":%s,"updated_utc":"%s","stage":"%s","reason":"%s","terminal":%s,"devices":{"0000:01:00.0":{"state":"%s","bind_attempts":%s},"0001:01:00.0":{"state":"%s","bind_attempts":%s}}}\n' \
+		"$$" "$utc" "$stage" "$reason" "$terminal" "$state0" "$attempt0" "$state1" "$attempt1" > "$run_dir/status.tmp"
+	mv "$run_dir/status.tmp" "$run_dir/status.json"
+}
+cleanup() {
+	if [ -n "$bind_pid" ]; then
+		kill -TERM "-$bind_pid" 2>/dev/null || kill -TERM "$bind_pid" 2>/dev/null || :
+	fi
+	if [ "$own_lock" = 1 ]; then
+		rm -f "$status_root/lock/pid"
+		rmdir "$status_root/lock" 2>/dev/null || :
+	fi
+}
+finish() {
+	if [ -n "$run_dir" ]; then publish "$1" "$2" true; fi
+	done=1
+	log "$1 reason=$2"
+	exit "$3"
+}
+on_exit() {
+	rc=$?
+	trap - 0
+	set +e
+	if [ "$done" != 1 ]; then
+		log "failed reason=unexpected_exit rc=$rc"
+		if [ -n "$run_dir" ]; then publish failed unexpected_exit true; fi
+		[ "$rc" != 0 ] || rc=1
+	fi
+	cleanup
+	exit "$rc"
+}
+trap on_exit 0
+trap 'finish failed interrupted 143' TERM
+trap 'finish failed interrupted 130' INT
+trap 'finish failed interrupted 129' HUP
+need_value() {
+	if [ "$#" -lt 2 ] || [ -z "$2" ]; then finish failed missing_argument 2; fi
+}
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--help)
+			printf '%s\n' 'Usage: ac86u-radio-recover [--dry-run] [--sysfs-root DIR] [--board-file FILE] [--status-root DIR] [--max-seconds 1..120] [--settle-seconds 1..10] [--clock-root DIR]
+Wait for real PHYs; retry only either expected unbound AC86U PCI radio using the already-loaded brcmfmac driver. Four additional binds maximum, with 1/2/4/8-second backoff. No module loading, unbind, configuration changes, or ongoing traffic supervision.
+Defaults: /sys, /tmp/sysinfo/board_name, /tmp/ac86u-radio-recover, 120 seconds overall, 5 seconds settling. Status is atomic JSON in a unique RAM run directory. Dry-run performs no writes. Test-only clock-root requires a non-/sys root and readable now plus executable sleep.'
+			done=1; exit 0 ;;
+		--dry-run) dry_run=1; shift ;;
+		--sysfs-root) need_value "$@"; sysfs=$2; shift 2 ;;
+		--board-file) need_value "$@"; board_file=$2; shift 2 ;;
+		--status-root) need_value "$@"; status_root=$2; shift 2 ;;
+		--clock-root) need_value "$@"; clock_root=$2; shift 2 ;;
+		--max-seconds) need_value "$@"; max_seconds=$2; shift 2 ;;
+		--settle-seconds) need_value "$@"; settle_seconds=$2; shift 2 ;;
+		*) finish failed unknown_argument 2 ;;
+	esac
+done
+case "$max_seconds" in ''|*[!0-9]*|0*) finish failed invalid_limits 2 ;; esac
+case "$settle_seconds" in ''|*[!0-9]*|0*) finish failed invalid_limits 2 ;; esac
+if [ "${#max_seconds}" -gt 3 ] || [ "${#settle_seconds}" -gt 2 ]; then finish failed invalid_limits 2; fi
+if [ "$max_seconds" -lt 1 ] || [ "$max_seconds" -gt 120 ] ||
+	[ "$settle_seconds" -lt 1 ] || [ "$settle_seconds" -gt 10 ]; then finish failed invalid_limits 2; fi
+case "$sysfs:$board_file:$status_root" in /*:/*:/*) ;; *) finish failed absolute_paths_required 2 ;; esac
+if [ ! -f "$board_file" ] || [ ! -r "$board_file" ]; then finish failed board_file_missing 1; fi
+board=
+IFS= read -r board < "$board_file" || :
+if [ "$board" != 'asus,rt-ac86u' ]; then done=1; log 'skipped other_board'; exit 0; fi
+[ -d "$sysfs" ] || finish failed sysfs_missing 1
+sysfs=$(readlink -f "$sysfs")
+if [ "$sysfs" = /sys ]; then
+	status_root=$(readlink -f "$status_root") || finish failed invalid_status_root 2
+	case "$status_root" in /tmp/*) ;; *) finish failed status_must_be_ram 2 ;; esac
+fi
+if [ -n "$clock_root" ]; then
+	case "$clock_root" in /*) ;; *) finish failed absolute_test_clock_required 2 ;; esac
+	if [ "$sysfs" = /sys ] || [ ! -f "$clock_root/now" ] || [ ! -r "$clock_root/now" ] || [ ! -x "$clock_root/sleep" ]; then
+		finish failed invalid_test_clock 2
+	fi
+fi
+driver_root=$sysfs/bus/pci/drivers/brcmfmac
+bind_file=$driver_root/bind
+target() {
+	case "$1" in
+		0) bdf=0000:01:00.0; attempt=$attempt0; due=$due0; state=$state0 ;;
+		1) bdf=0001:01:00.0; attempt=$attempt1; due=$due1; state=$state1 ;;
+		*) finish failed invalid_target 1 ;;
+	esac
+	device=$sysfs/bus/pci/devices/$bdf
+}
+validate_device() {
+	if [ ! -f "$device/vendor" ] || [ ! -f "$device/device" ] ||
+		[ ! -r "$device/vendor" ] || [ ! -r "$device/device" ]; then finish failed device_missing 1; fi
+	vendor='' device_id=''
+	read -r vendor < "$device/vendor" || :
+	read -r device_id < "$device/device" || :
+	if [ "$vendor" != 0x14e4 ] || [ "$device_id" != 0x4365 ]; then finish failed unexpected_pci_id 1; fi
+}
+module_available() {
+	if [ ! -d "$sysfs/module/brcmfmac" ] || [ ! -e "$bind_file" ] ||
+		[ ! -L "$driver_root/module" ]; then
+		finish failed module_missing 1
+	fi
+	if [ "$(readlink -f "$driver_root/module")" != "$(readlink -f "$sysfs/module/brcmfmac")" ]; then
+		finish failed foreign_module 1
+	fi
+	[ ! -d "$bind_file" ] || finish failed unsupported_bind_path 1
+}
+observe_target() {
+	target "$1"
+	validate_device
+	state=unbound
+	if [ -e "$device/driver" ] && [ ! -L "$device/driver" ]; then finish failed unsupported_driver_path 1; fi
+	if [ -L "$device/driver" ]; then
+		[ "$(readlink -f "$device/driver")" = "$(readlink -f "$driver_root")" ] || finish failed foreign_driver 1
+		state=initializing
+	fi
+	for phy in "$sysfs"/class/ieee80211/phy*; do
+		if [ -L "$phy/device" ] && [ "$(readlink -f "$phy/device")" = "$(readlink -f "$device")" ]; then
+			state=ready
+			break
+		fi
+	done
+	case "$1" in 0) state0=$state ;; 1) state1=$state ;; esac
+}
+observe_all() { module_available; observe_target 0; observe_target 1; }
+tick() {
+	if [ -n "$clock_root" ]; then "$clock_root/sleep" 1; else sleep 1; fi
+	clock_now
+}
+observe_all
+if [ "$dry_run" = 1 ]; then
+	log "dry_run 0000:01:00.0=$state0 0001:01:00.0=$state1 max_additional_binds=4 deadline=$max_seconds"
+	done=1; exit 0
+fi
+for required in timeout date mktemp mv; do command -v "$required" >/dev/null 2>&1 || finish failed missing_command 1; done
+[ -w "$bind_file" ] || finish failed bind_not_writable 1
+mkdir -p "$status_root" || finish failed status_root_unavailable 1
+mkdir "$status_root/lock" 2>/dev/null || finish failed existing_instance_or_stale_lock 1
+own_lock=1
+printf '%s\n' "$$" > "$status_root/lock/pid"
+run_dir=$(mktemp -d "$status_root/run.XXXXXX")
+clock_now
+deadline=$((NOW + max_seconds))
+due0=$((NOW + 1)); due1=$due0
+log "started run_dir=$run_dir deadline_seconds=$max_seconds"
+publish waiting observing false
+bind_target() {
+	active=$1
+	target "$active"
+	validate_device
+	[ ! -L "$device/driver" ] || return 0
+	attempt=$((attempt + 1))
+	case "$active" in 0) attempt0=$attempt ;; 1) attempt1=$attempt ;; esac
+	remaining=$((deadline - NOW))
+	[ "$remaining" -gt 0 ] || finish failed deadline 1
+	log "binding target=$bdf additional_attempt=$attempt"
+	publish binding bind_in_progress false
+	# The child shell expands its own positional arguments, never parent input as code.
+	# shellcheck disable=SC2016
+	timeout -s KILL "$remaining" sh -c 'printf "%s\n" "$1" > "$2"' ac86u-bind "$bdf" "$bind_file" &
+	bind_pid=$!
+	while kill -0 "$bind_pid" 2>/dev/null; do
+		clock_now
+		[ "$NOW" -lt "$deadline" ] || finish failed deadline 1
+		observe_all
+		publish binding bind_in_progress false
+		tick
+	done
+	if wait "$bind_pid"; then log 'bind_returned'; else log 'bind_failed'; fi
+	bind_pid=
+	clock_now
+	target "$active"
+	case "$attempt" in 1) backoff=2 ;; 2) backoff=4 ;; 3) backoff=8 ;; *) backoff=0 ;; esac
+	due=$((NOW + settle_seconds + backoff))
+	case "$active" in 0) due0=$due ;; 1) due1=$due ;; esac
+}
+while :; do
+	observe_all
+	if [ "$state0" = ready ] && [ "$state1" = ready ]; then finish ready both_phys_present 0; fi
+	clock_now
+	[ "$NOW" -lt "$deadline" ] || finish failed deadline 1
+	for index in 0 1; do
+		target "$index"
+		if [ "$state" = unbound ] && [ "$NOW" -ge "$due" ]; then
+			[ "$attempt" -lt 4 ] || finish failed attempts_exhausted 1
+			bind_target "$index"
+			break
+		fi
+	done
+	publish waiting observing false
+	tick
+done
+# <FILE>target/linux/bcm4908/base-files/usr/libexec/ac86u-radio-recover</FILE> - <DESC>Bounded AC86U stock-radio startup recovery.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>

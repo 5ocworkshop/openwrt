@@ -189,7 +189,7 @@ config BUSYBOX_DEFAULT_FEATURE_USE_BSS_TAIL
 	default n
 config BUSYBOX_DEFAULT_FLOAT_DURATION
 	bool
-	default n
+	default y
 config BUSYBOX_DEFAULT_FEATURE_RTMINMAX
 	bool
 	default n
@@ -807,10 +807,10 @@ config BUSYBOX_DEFAULT_FEATURE_SPLIT_FANCY
 	default n
 config BUSYBOX_DEFAULT_STAT
 	bool
-	default n
+	default y
 config BUSYBOX_DEFAULT_FEATURE_STAT_FORMAT
 	bool
-	default n
+	default y
 config BUSYBOX_DEFAULT_FEATURE_STAT_FILESYSTEM
 	bool
 	default n
@@ -858,7 +858,7 @@ config BUSYBOX_DEFAULT_FEATURE_TEST_64
 	default y
 config BUSYBOX_DEFAULT_TIMEOUT
 	bool
-	default n
+	default y
 config BUSYBOX_DEFAULT_TOUCH
 	bool
 	default y

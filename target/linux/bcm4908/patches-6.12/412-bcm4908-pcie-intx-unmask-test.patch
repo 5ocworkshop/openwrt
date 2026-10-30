@@ -1,0 +1,57 @@
+# <FILE>target/linux/bcm4908/patches-6.12/412-bcm4908-pcie-intx-unmask-test.patch</FILE> - <DESC>Bounded BCM4908 legacy PCIe interrupt gate experiment.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Test the vendor-matching INTA-D unmask before radio endpoint enumeration.</WCTX>
+# <CLOG>Write only BCM4908 mask-clear bits1..4 after setup and before pci_host_probe.</CLOG>
+#
+# Diagnostic module contract: PCIE_BRCMSTB=m, existing Linux6.12.112 ABI;
+# existing setup and PERST revision guards -> BCM4908-only unmask -> PCI scan.
+# No status reads, MSI/BAR/range/reset/timing changes, or radio firmware changes.
+# This tests a vendor-observed gate; it does not establish the final irqchip/DT
+# design or prove wireless operation. Preserve the original module for rollback.
+# Primary prior proposal and interrupt-controller ownership review:
+# https://lists.infradead.org/pipermail/linux-arm-kernel/2021-August/679604.html
+
+--- a/drivers/pci/controller/pcie-brcmstb.c
++++ b/drivers/pci/controller/pcie-brcmstb.c
+@@ -151,6 +151,8 @@
+ 
+ #define PCIE_EXT_CFG_DATA				0x8000
+ #define PCIE_EXT_CFG_INDEX				0x9000
++
++#define PCIE_CPU_INTR1_INTR_MASK_CLEAR_OFFSET		0x940c
+ 
+ #define  PCIE_RGR1_SW_INIT_1_PERST_MASK			0x1
+ #define  PCIE_RGR1_SW_INIT_1_PERST_SHIFT		0x0
+@@ -1800,6 +1802,20 @@
+ 	.remove_bus = brcm_pcie_remove_bus,
+ };
+ 
++/*
++ * Experimental vendor-matching legacy interrupt gate for BCM4906/BCM4908.
++ * Keep this after successful setup/revision checks and before enumeration.
++ * Interrupt-controller DT ownership remains a separate upstream design task.
++ */
++static void brcm_pcie_bcm4908_unmask_intx(struct brcm_pcie *pcie)
++{
++	if (pcie->cfg->soc_base != BCM4908)
++		return;
++
++	writel(GENMASK(4, 1), pcie->base + PCIE_CPU_INTR1_INTR_MASK_CLEAR_OFFSET);
++	dev_info(pcie->dev, "experimental BCM4908 legacy INTx: unmasked INTA-D (0x1e)\n");
++}
++
+ static int brcm_pcie_probe(struct platform_device *pdev)
+ {
+ 	struct device_node *np = pdev->dev.of_node;
+@@ -1921,6 +1937,8 @@
+ 	bridge->sysdata = pcie;
+ 
+ 	platform_set_drvdata(pdev, pcie);
++
++	brcm_pcie_bcm4908_unmask_intx(pcie);
+ 
+ 	ret = pci_host_probe(bridge);
+ 	if (!ret && !brcm_pcie_link_up(pcie))
+
+# <FILE>target/linux/bcm4908/patches-6.12/412-bcm4908-pcie-intx-unmask-test.patch</FILE> - <DESC>Bounded BCM4908 legacy PCIe interrupt gate experiment.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>

@@ -1,0 +1,234 @@
+# <FILE>package/system/procd/patches/910-firmware-loader-abort.patch</FILE> - <DESC>Abort failed or incomplete generic firmware fallback requests.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Prevent loading=0 from publishing empty or partial firmware as a completed fallback.</WCTX>
+# <CLOG>Require a nonempty fully transferred source and send loading=-1 on errors, with partial IO/EINTR handling.</CLOG>
+#
+# Generic procd/sysfs protocol fix, not a wireless-driver workaround.
+# The existing handler owns one loading/data transaction and its descriptor cleanup.
+# Commit0 only follows positive fstat size, all bytes through EOF, and closed data/source.
+# EOF before the opened positive size is fully transferred is incomplete.
+# Preserve existing read-until-EOF behavior when the source grows.
+# Missing/open/read/write/zero-size/incomplete errors attempt atomic abort-1.
+# Sysfs loading commands are single writes (EINTR retried), never split into
+# separate commands. Data partial writes are completed before counting progress.
+# Unavailable/unaddressable loading attributes cannot be notified; log failure
+# and never publish success. Preserve the existing child-exit convention.
+# Kernel batched-request interleaving is not claimed as a captured runtime trace.
+
+--- a/plug/hotplug.c
++++ b/plug/hotplug.c
+@@ -228,7 +228,11 @@
+ 	char *dev = hotplug_msg_find_var(msg, "DEVPATH");
+ 	struct stat s = { 0 };
+ 	char *path, loadpath[256], syspath[256];
+-	int fw, src, load, len;
++	int fw = -1, src = -1, load = -1, n, complete = 0;
++	ssize_t len = 0, written;
++	off_t remaining;
++	size_t offset, result_len;
++	const char *result;
+ 	static char buf[4096];
+ 
+ 	P_DEBUG(2, "Firmware request for %s/%s\n", dir, file);
+@@ -238,66 +242,151 @@
+ 		exit(EXIT_FAILURE);
+ 	}
+ 
++	n = snprintf(loadpath, sizeof(loadpath), "/sys/%s/loading", dev);
++	if (n < 0 || (size_t)n >= sizeof(loadpath)) {
++		ERROR("Firmware loading path is too long for %s\n", dev);
++		exit(EXIT_FAILURE);
++	}
++	n = snprintf(syspath, sizeof(syspath), "/sys/%s/data", dev);
++	if (n < 0 || (size_t)n >= sizeof(syspath)) {
++		ERROR("Firmware data path is too long for %s\n", dev);
++		goto abort;
++	}
+ 	path = alloca(strlen(dir) + strlen(file) + 2);
+ 	sprintf(path, "%s/%s", dir, file);
+ 
+-	if (stat(path, &s)) {
++	do {
++		n = stat(path, &s);
++	} while (n < 0 && errno == EINTR);
++	if (n < 0) {
+ 		ERROR("Could not find firmware %s: %m\n", path);
+-		src = -1;
+-		s.st_size = 0;
+-		goto send_to_kernel;
+-	}
+-
+-	src = open(path, O_RDONLY);
++		goto abort;
++	}
++	do {
++		src = open(path, O_RDONLY);
++	} while (src < 0 && errno == EINTR);
+ 	if (src < 0) {
+ 		ERROR("Failed to open %s: %m\n", path);
+-		s.st_size = 0;
+-		goto send_to_kernel;
+-	}
+-
+-send_to_kernel:
+-	snprintf(loadpath, sizeof(loadpath), "/sys/%s/loading", dev);
+-	load = open(loadpath, O_WRONLY);
+-	if (!load) {
++		goto abort;
++	}
++	do {
++		n = fstat(src, &s);
++	} while (n < 0 && errno == EINTR);
++	if (n < 0 || s.st_size <= 0) {
++		if (!n)
++			errno = EINVAL;
++		ERROR("Invalid firmware file %s: %m\n", path);
++		goto abort;
++	}
++	do {
++		load = open(loadpath, O_WRONLY);
++	} while (load < 0 && errno == EINTR);
++	if (load < 0) {
+ 		ERROR("Failed to open %s: %m\n", loadpath);
+-		exit(EXIT_FAILURE);
+-	}
+-	if (write(load, "1", 1) == -1) {
++		goto abort;
++	}
++	do {
++		len = write(load, "1", 1);
++	} while (len < 0 && errno == EINTR);
++	if (len != 1) {
++		if (len >= 0)
++			errno = EIO;
+ 		ERROR("Failed to write to %s: %m\n", loadpath);
+-		exit(EXIT_FAILURE);
+-	}
+-	close(load);
+-
+-	snprintf(syspath, sizeof(syspath), "/sys/%s/data", dev);
+-	fw = open(syspath, O_WRONLY);
++		goto abort;
++	}
++	n = close(load);
++	load = -1;
++	if (n) {
++		ERROR("Failed to close %s: %m\n", loadpath);
++		goto abort;
++	}
++	do {
++		fw = open(syspath, O_WRONLY);
++	} while (fw < 0 && errno == EINTR);
+ 	if (fw < 0) {
+ 		ERROR("Failed to open %s: %m\n", syspath);
+-		exit(EXIT_FAILURE);
+-	}
+-
+-	len = s.st_size;
+-	while (len) {
+-		len = read(src, buf, sizeof(buf));
+-		if (len <= 0)
+-			break;
+-
+-		if (write(fw, buf, len) == -1) {
+-			ERROR("failed to write firmware file %s/%s to %s: %m\n", dir, file, dev);
++		goto abort;
++	}
++	remaining = s.st_size;
++	for (;;) {
++		do {
++			len = read(src, buf, sizeof(buf));
++		} while (len < 0 && errno == EINTR);
++		if (len < 0) {
++			ERROR("Failed to read firmware %s: %m\n", path);
++			goto abort;
++		}
++		if (!len) {
++			if (remaining > 0) {
++				errno = EIO;
++				ERROR("Failed to read complete firmware %s: %m\n", path);
++				goto abort;
++			}
+ 			break;
+ 		}
+-	}
+-
+-	if (src >= 0)
+-		close(src);
+-	close(fw);
+-
+-	load = open(loadpath, O_WRONLY);
+-	if (write(load, "0", 1) == -1)
++		for (offset = 0; offset < (size_t)len; offset += written) {
++			do {
++				written = write(fw, buf + offset, len - offset);
++			} while (written < 0 && errno == EINTR);
++			if (written <= 0) {
++				if (!written)
++					errno = EIO;
++				ERROR("failed to write firmware file %s/%s to %s: %m\n", dir, file, dev);
++				goto abort;
++			}
++		}
++		remaining = len < remaining ? remaining - len : 0;
++	}
++	complete = 1;
++	goto out;
++
++abort:
++	complete = 0;
++out:
++	if (src >= 0) {
++		if (close(src)) {
++			ERROR("Failed to close firmware source: %m\n");
++			complete = 0;
++		}
++		src = -1;
++	}
++	if (fw >= 0) {
++		if (close(fw)) {
++			ERROR("Failed to close firmware data: %m\n");
++			complete = 0;
++		}
++		fw = -1;
++	}
++	if (load >= 0) {
++		if (close(load))
++			ERROR("Failed to close %s: %m\n", loadpath);
++		load = -1;
++	}
++	do {
++		load = open(loadpath, O_WRONLY);
++	} while (load < 0 && errno == EINTR);
++	if (load < 0) {
++		ERROR("Failed to open %s: %m\n", loadpath);
++		complete = 0;
++		goto done;
++	}
++	result = complete ? "0" : "-1";
++	result_len = complete ? 1 : 2;
++	do {
++		len = write(load, result, result_len);
++	} while (len < 0 && errno == EINTR);
++	if (len != (ssize_t)result_len) {
++		if (len >= 0)
++			errno = EIO;
+ 		ERROR("failed to write to %s: %m\n", loadpath);
+-	close(load);
+-
+-	P_DEBUG(2, "Done loading %s\n", path);
+-
++		if (complete)
++			goto abort;
++	}
++done:
++	if (load >= 0 && close(load))
++		ERROR("Failed to close %s: %m\n", loadpath);
++	if (complete)
++		P_DEBUG(2, "Done loading %s\n", path);
+ 	exit(EXIT_FAILURE);
+ }
+ 
+
+# <FILE>package/system/procd/patches/910-firmware-loader-abort.patch</FILE> - <DESC>Abort failed or incomplete generic firmware fallback requests.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>

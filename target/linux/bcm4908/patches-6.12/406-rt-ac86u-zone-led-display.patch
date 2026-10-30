@@ -1,0 +1,398 @@
+# <FILE>target/linux/bcm4908/patches-6.12/406-rt-ac86u-zone-led-display.patch</FILE> - <DESC>Four-zone counted-pulse boot and panic LED display.</DESC>
+# <VERS>VERSION: 0.1.1</VERS>
+# <WCTX>Display boot zones without binary decoding or scheduling during panic.</WCTX>
+# <CLOG>Add polled zone pulses, persistent WAN anchor, guarded userspace steps and panic replay.</CLOG>
+
+--- a/drivers/leds/blink/leds-bcm63138.c
++++ b/drivers/leds/blink/leds-bcm63138.c
+@@ -8,6 +8,10 @@
+ #include <linux/panic_notifier.h>
+ #include <linux/panic.h>
+ #include <linux/errno.h>
++#include <linux/ctype.h>
++#include <linux/timer.h>
++#include <linux/jiffies.h>
++#include <linux/rtac86u_bootwaypoints.h>
+ #define RTAC86U_BOOTDIAG_PROVIDER
+ #include <linux/rtac86u_bootdiag.h>
+ #include <linux/io.h>
+@@ -59,6 +63,12 @@
+ 	u32 bootdiag_available;
+ 	bool bootdiag_panicked;
+ 	bool rootdiag;
++	bool bootzones;
++	struct timer_list zone_timer;
++	struct rtac86u_wp_snapshot zone_cached;
++	struct rtac86u_wp_snapshot zone_panic;
++	unsigned int zone_tick;
++	long (*zone_previous_panic_blink)(int);
+ 	bool rootdiag_fatal;
+ 	int rootdiag_error;
+ 	unsigned int bootdiag_stage;
+@@ -171,6 +181,215 @@
+ 	leds->bootdiag_phase = phase;
+ }
+ 
++
++/* One 150 ms tick per half-pulse, followed by at least 900 ms quiet. */
++static unsigned int rtac86u_zone_substep(unsigned int step)
++{
++	return !step ? 1 : step > 4 ? 4 : step;
++}
++
++static u32 rtac86u_zone_lan_mask(unsigned int completed, unsigned int zone,
++			       unsigned int step, unsigned int tick, bool failed)
++{
++	u32 mask = 0;
++	unsigned int bit, count = rtac86u_zone_substep(step);
++
++	for (bit = 0; bit < 4; bit++)
++		if (completed & BIT(bit))
++			mask |= BIT(19 - bit);
++	if (!zone || zone > 4)
++		return mask;
++	if (!(completed & BIT(zone - 1)) || failed) {
++		mask &= ~BIT(20 - zone);
++		tick %= count * 2 + 6;
++		if (tick < count * 2 && !(tick & 1))
++			mask |= BIT(20 - zone);
++	}
++	return mask;
++}
++
++/* Caller owns leds->lock. Keep the white WAN anchor on, also in panic. */
++static void rtac86u_zone_render(struct bcm63138_leds *leds, u32 mask, bool panic)
++{
++	struct bcm63138_led led = {};
++
++	for (led.pin = 16; led.pin <= 19; led.pin++) {
++		bcm63138_leds_set_flash_rate(leds, &led, 0);
++		bcm63138_leds_set_bright(leds, &led, BCM63138_MAX_BRIGHTNESS);
++		bcm63138_leds_enable_led(leds, &led, mask & BIT(led.pin));
++	}
++	led.pin = 21;
++	bcm63138_leds_set_flash_rate(leds, &led, 0);
++	bcm63138_leds_set_bright(leds, &led, BCM63138_MAX_BRIGHTNESS);
++	bcm63138_leds_enable_led(leds, &led, BCM63138_MAX_BRIGHTNESS);
++	if (!panic) {
++		led.pin = 20;
++		bcm63138_leds_set_flash_rate(leds, &led, 0);
++		bcm63138_leds_enable_led(leds, &led, LED_OFF);
++	}
++}
++
++static void rtac86u_zone_timer(struct timer_list *timer)
++{
++	struct bcm63138_leds *leds = from_timer(leds, timer, zone_timer);
++	struct rtac86u_wp_snapshot snapshot;
++	unsigned long flags;
++	bool rearm = false;
++
++	rtac86u_wp_snapshot(&snapshot);
++	spin_lock_irqsave(&leds->lock, flags);
++	if (leds->bootzones && !leds->bootdiag_panicked) {
++		if (snapshot.active_zone != leds->zone_cached.active_zone ||
++		    snapshot.substep != leds->zone_cached.substep ||
++		    snapshot.completed_mask != leds->zone_cached.completed_mask)
++			leds->zone_tick = 0;
++		leds->zone_cached = snapshot;
++		rtac86u_zone_render(leds, rtac86u_zone_lan_mask(
++			snapshot.completed_mask, snapshot.active_zone,
++			snapshot.substep, leds->zone_tick++, snapshot.failed), false);
++		leds->zone_tick %= rtac86u_zone_substep(snapshot.substep) * 2 + 6;
++		rearm = true;
++	}
++	if (rearm)
++		mod_timer(&leds->zone_timer, jiffies + msecs_to_jiffies(150));
++	spin_unlock_irqrestore(&leds->lock, flags);
++}
++
++/* No lock is retained across a panic polling delay. */
++static bool rtac86u_zone_panic_write(const struct rtac86u_wp_snapshot *snapshot,
++				     bool on)
++{
++	struct bcm63138_leds *leds;
++	unsigned long flags;
++	bool written = false;
++
++	if (!spin_trylock_irqsave(&rtac86u_bootdiag_lock, flags))
++		return false;
++	leds = rtac86u_bootdiag_controller;
++	if (leds && spin_trylock(&leds->lock)) {
++		if (leds->bootzones && leds->bootdiag_panicked) {
++			rtac86u_zone_render(leds, rtac86u_zone_lan_mask(
++				snapshot->completed_mask, snapshot->active_zone,
++				snapshot->substep, on ? 0 : 1, true), true);
++			written = true;
++		}
++		spin_unlock(&leds->lock);
++	}
++	spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
++	return written;
++}
++
++static long rtac86u_zone_panic_blink(int state)
++{
++	struct rtac86u_wp_snapshot snapshot;
++	struct bcm63138_leds *leds;
++	unsigned long flags;
++	unsigned int pulse, count;
++	long elapsed = 0;
++	bool available = false;
++
++	if (!spin_trylock_irqsave(&rtac86u_bootdiag_lock, flags))
++		return 0;
++	leds = rtac86u_bootdiag_controller;
++	if (leds && spin_trylock(&leds->lock)) {
++		if (leds->bootzones && leds->bootdiag_panicked) {
++			snapshot = leds->zone_panic;
++			available = true;
++		}
++		spin_unlock(&leds->lock);
++	}
++	spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
++	if (!available || !snapshot.active_zone || snapshot.active_zone > 4)
++		return 0;
++	count = rtac86u_zone_substep(snapshot.substep);
++	for (pulse = 0; pulse < count; pulse++) {
++		if (!rtac86u_zone_panic_write(&snapshot, true))
++			break;
++		mdelay(150);
++		elapsed += 150;
++		if (!rtac86u_zone_panic_write(&snapshot, false))
++			break;
++		mdelay(150);
++		elapsed += 150;
++	}
++	/* kernel/panic.c accounts elapsed and supplies its 1800 ms inter-burst gap. */
++	return elapsed;
++}
++
++static int rtac86u_zone_parse(const char *buf, size_t count, unsigned int *zone,
++			      unsigned int *step, unsigned int *phase)
++{
++	unsigned int values[3] = {};
++	unsigned int field = 0;
++	size_t i;
++	bool token = false;
++
++	if (!count || count > 32)
++		return -EINVAL;
++	for (i = 0; i < count; i++) {
++		unsigned char c = buf[i];
++
++		if (isdigit(c)) {
++			if (field >= 3)
++				return -EINVAL;
++			values[field] = values[field] * 10 + c - '0';
++			if (values[field] > 4)
++				return -EINVAL;
++			token = true;
++		} else if (isspace(c)) {
++			if (token) {
++				field++;
++				token = false;
++			}
++		} else {
++			return -EINVAL;
++		}
++	}
++	if (token)
++		field++;
++	if (field != 3 || !values[0] || !values[1] || values[2] > 2)
++		return -EINVAL;
++	*zone = values[0];
++	*step = values[1];
++	*phase = values[2];
++	return 0;
++}
++
++static ssize_t boot_waypoint_show(struct device *dev,
++				 struct device_attribute *attr, char *buf)
++{
++	struct rtac86u_wp_snapshot snapshot;
++
++	rtac86u_wp_snapshot(&snapshot);
++	return sysfs_emit(buf,
++		"completed=%x zone=%u step=%u failed=%u site=%u errno=%d root_dev=%u root_disk=%u\n",
++		snapshot.completed_mask, snapshot.active_zone, snapshot.substep,
++		snapshot.failed, snapshot.site, snapshot.error,
++		snapshot.root_dev, snapshot.root_disk);
++}
++
++static ssize_t boot_waypoint_store(struct device *dev,
++				  struct device_attribute *attr,
++				  const char *buf, size_t count)
++{
++	struct bcm63138_leds *leds = dev_get_drvdata(dev);
++	unsigned int zone, step, phase;
++	int err;
++
++	if (!capable(CAP_SYS_ADMIN))
++		return -EPERM;
++	if (!READ_ONCE(leds->bootzones))
++		return -EOPNOTSUPP;
++	err = rtac86u_zone_parse(buf, count, &zone, &step, &phase);
++	if (err)
++		return err;
++	if (READ_ONCE(leds->bootdiag_panicked))
++		return -EBUSY;
++	rtac86u_wp_step(zone, step, phase);
++	return count;
++}
++static DEVICE_ATTR_RW(boot_waypoint);
++
+ void rtac86u_bootdiag_checkpoint(unsigned int stage, unsigned int phase)
+ {
+ 	struct bcm63138_leds *leds;
+@@ -179,6 +398,10 @@
+ 
+ 	if (!stage || stage > 15 || phase > 2)
+ 		return;
++	if (rtac86u_wp_enabled()) {
++		rtac86u_wp_legacy(stage, phase);
++		return;
++	}
+ 	spin_lock_irqsave(&rtac86u_bootdiag_lock, flags);
+ 	leds = rtac86u_bootdiag_controller;
+ 	if (leds) {
+@@ -199,6 +422,11 @@
+ {
+ 	struct bcm63138_leds *leds;
+ 	unsigned long flags;
++
++	if (rtac86u_wp_enabled()) {
++		rtac86u_wp_legacy(stage, 1);
++		return;
++	}
+ 
+ 	spin_lock_irqsave(&rtac86u_bootdiag_lock, flags);
+ 	leds = rtac86u_bootdiag_controller;
+@@ -245,6 +473,10 @@
+ 	unsigned long flags;
+ 	bool changed = false;
+ 
++	/* Precise waypoint hooks own the root zone in the advanced mode. */
++	if (rtac86u_wp_enabled())
++		return;
++
+ 	if (!stage || stage > 15 || phase > 2)
+ 		return;
+ 	spin_lock_irqsave(&rtac86u_bootdiag_lock, flags);
+@@ -304,7 +536,23 @@
+ 		return NOTIFY_DONE;
+ 	}
+ 	leds->bootdiag_panicked = true;
+-	if (leds->rootdiag && leds->rootdiag_fatal) {
++	if (leds->bootzones) {
++		struct rtac86u_wp_snapshot frozen;
++
++		if (!rtac86u_wp_panic(&frozen, leds->rootdiag_error,
++				       leds->rootdiag_fatal))
++			frozen = leds->zone_cached;
++		frozen.failed = true;
++		leds->zone_panic = frozen;
++		del_timer(&leds->zone_timer);
++		rtac86u_zone_render(leds, rtac86u_zone_lan_mask(
++			frozen.completed_mask, frozen.active_zone,
++			frozen.substep, 1, true), true);
++		if (READ_ONCE(panic_blink) != rtac86u_zone_panic_blink) {
++			leds->zone_previous_panic_blink = READ_ONCE(panic_blink);
++			WRITE_ONCE(panic_blink, rtac86u_zone_panic_blink);
++		}
++	} else if (leds->rootdiag && leds->rootdiag_fatal) {
+ 		rtac86u_bootdiag_render(leds,
+ 			rtac86u_rootdiag_error_code(leds->rootdiag_error), 2);
+ 		/* Blinking LAN4 distinguishes an errno from a steady stage. */
+@@ -318,7 +566,8 @@
+ 	bcm63138_leds_enable_led(leds, &led, BCM63138_MAX_BRIGHTNESS);
+ 	bcm63138_leds_set_flash_rate(leds, &led, 6);
+ 	led.pin = 21;
+-	bcm63138_leds_enable_led(leds, &led, LED_OFF);
++	bcm63138_leds_enable_led(leds, &led,
++		leds->bootzones ? BCM63138_MAX_BRIGHTNESS : LED_OFF);
+ 	spin_unlock(&leds->lock);
+ 	spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
+ 	return NOTIFY_DONE;
+@@ -363,12 +612,24 @@
+ {
+ 	struct bcm63138_leds *leds = data;
+ 	unsigned long flags;
++	bool zones;
+ 
+ 	atomic_notifier_chain_unregister(&panic_notifier_list,
+ 					 &leds->bootdiag_panic);
++	/* Serialize against the callback's rearm before waiting without locks. */
++	spin_lock_irqsave(&leds->lock, flags);
++	zones = leds->bootzones;
++	leds->bootzones = false;
++	spin_unlock_irqrestore(&leds->lock, flags);
++	if (zones)
++		del_timer_sync(&leds->zone_timer);
+ 	spin_lock_irqsave(&rtac86u_bootdiag_lock, flags);
++	if (READ_ONCE(panic_blink) == rtac86u_zone_panic_blink)
++		WRITE_ONCE(panic_blink, leds->zone_previous_panic_blink);
+ 	rtac86u_bootdiag_controller = NULL;
+ 	spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
++	if (zones)
++		device_remove_file(leds->dev, &dev_attr_boot_waypoint);
+ 	device_remove_file(leds->dev, &dev_attr_boot_stage);
+ }
+ 
+@@ -382,13 +643,24 @@
+ 		return 0;
+ 	if ((leds->bootdiag_available & GENMASK(21, 16)) != GENMASK(21, 16))
+ 		return dev_err_probe(leds->dev, -ENODEV, "Diagnostic LED pins unavailable\n");
++	leds->bootzones = rtac86u_wp_enable();
++	timer_setup(&leds->zone_timer, rtac86u_zone_timer, 0);
+ 	err = device_create_file(leds->dev, &dev_attr_boot_stage);
+ 	if (err)
+ 		return err;
++	if (leds->bootzones) {
++		err = device_create_file(leds->dev, &dev_attr_boot_waypoint);
++		if (err) {
++			device_remove_file(leds->dev, &dev_attr_boot_stage);
++			return err;
++		}
++	}
+ 	leds->bootdiag_panic.notifier_call = rtac86u_bootdiag_panic;
+ 	err = atomic_notifier_chain_register(&panic_notifier_list,
+ 					    &leds->bootdiag_panic);
+ 	if (err) {
++		if (leds->bootzones)
++			device_remove_file(leds->dev, &dev_attr_boot_waypoint);
+ 		device_remove_file(leds->dev, &dev_attr_boot_stage);
+ 		return err;
+ 	}
+@@ -396,13 +668,25 @@
+ 	spin_lock(&leds->lock);
+ 	leds->bootdiag = true;
+ 	leds->rootdiag = of_property_read_bool(of_root, "asus,rt-ac86u-rootdiag");
+-	rtac86u_bootdiag_render(leds, 1, 1);
++	if (leds->bootzones) {
++		rtac86u_wp_legacy(1, 1);
++		rtac86u_wp_snapshot(&leds->zone_cached);
++		rtac86u_zone_render(leds, rtac86u_zone_lan_mask(
++			leds->zone_cached.completed_mask, leds->zone_cached.active_zone,
++			leds->zone_cached.substep, 0, false), false);
++	} else {
++		rtac86u_bootdiag_render(leds, 1, 1);
++	}
+ 	rtac86u_bootdiag_controller = leds;
+ 	spin_unlock(&leds->lock);
+ 	spin_unlock_irqrestore(&rtac86u_bootdiag_lock, flags);
+ 	err = devm_add_action_or_reset(leds->dev, rtac86u_bootdiag_cleanup, leds);
+-	if (!err)
+-		dev_info(leds->dev, "rt-ac86u bootdiag: stage=1 phase=1\n");
++	if (!err) {
++		if (leds->bootzones)
++			mod_timer(&leds->zone_timer, jiffies + msecs_to_jiffies(150));
++		dev_info(leds->dev, "rt-ac86u bootdiag: stage=1 phase=1 zones=%u\n",
++			 leds->bootzones);
++	}
+ 	return err;
+ }
+ 
+
+# <FILE>target/linux/bcm4908/patches-6.12/406-rt-ac86u-zone-led-display.patch</FILE> - <DESC>Four-zone counted-pulse boot and panic LED display.</DESC>
+# <VERS>END OF VERSION: 0.1.1</VERS>

@@ -1,0 +1,25 @@
+# <FILE>target/linux/bcm4908/patches-6.12/409-mtdsplit-cfe-bootfs-skip-backup.patch</FILE> - <DESC>Return no match when CFE splitting intentionally skips backup.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Respect the MTD parser return contract under Linux 6.12 child-error propagation.</WCTX>
+# <CLOG>Change only the non-firmware skip to zero; retain active parsing and real errors.</CLOG>
+# Module contract: cfe-bootfs owns firmware subpartition discovery, not backup
+# parsing. Return zero for an intentionally inapplicable partition, positive
+# partition count for a match, and negative errno for genuine parsing failures.
+# No I/O, allocation, partition-core, NAND, ECC, or attachment behavior changes.
+# Test plan: compile the actual before/after parser and extracted 5.15/6.12
+# add_mtd_partitions functions with host I/O/registration stubs. Verify old
+# rollback, preserved siblings after the fix, no backup I/O, active split names
+# and offsets, and unchanged rootfs discovery/allocation error propagation.
+--- a/drivers/mtd/mtdsplit/mtdsplit_cfe_bootfs.c
++++ b/drivers/mtd/mtdsplit/mtdsplit_cfe_bootfs.c
+@@ -33,7 +33,7 @@ static int mtdsplit_cfe_bootfs_parse(struct mtd_info *mtd,
+ 
+ 	/* Don't parse backup partitions */
+ 	if (strcmp(mtd->name, "firmware"))
+-		return -EINVAL;
++		return 0;
+ 
+ 	/* Find the end of JFFS2 bootfs partition */
+ 	offset = 0;
+# <FILE>target/linux/bcm4908/patches-6.12/409-mtdsplit-cfe-bootfs-skip-backup.patch</FILE> - <DESC>Return no match when CFE splitting intentionally skips backup.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>
