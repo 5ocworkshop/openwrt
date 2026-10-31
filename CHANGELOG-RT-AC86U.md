@@ -1,13 +1,25 @@
 <!-- <FILE>CHANGELOG-RT-AC86U.md</FILE> - <DESC>Detailed AC86U fork change record.</DESC> -->
-<!-- <VERS>VERSION: 0.3.2</VERS> -->
-<!-- <WCTX>Prepare RC3 with the previously unselected exFAT filesystem driver.</WCTX> -->
-<!-- <CLOG>Record exFAT support and RC3 identity while retaining RC2 release history.</CLOG> -->
+<!-- <VERS>VERSION: 0.3.3</VERS> -->
+<!-- <WCTX>Prepare RC4 with FAT32/vfat and the retained exFAT, NTFS3 and ext4 drivers.</WCTX> -->
+<!-- <CLOG>Record FAT/VFAT support, native character-set dependencies and RC4 identity.</CLOG> -->
 
 # ASUS RT-AC86U changelog
 
 This personal fork starts from official OpenWrt25.12.6. Testing is limited to
 ASUS RT-AC86U hardware revision R1.5; other revisions and models are unverified.
 The experimental-use and warranty notice in README.md applies.
+
+## RC4 — 2026-10-31
+
+* Include `kmod-fs-vfat` with FAT/VFAT modules and native cp437, ISO-8859-1 and
+  UTF-8 NLS dependencies. The selected common USB filesystem set is now
+  FAT32/vfat, exFAT, NTFS through the kernel NTFS3 driver, and ext4.
+* Retain USB mass-storage/UAS, WireGuard kernel/tools/LuCI and BusyBox `nohup`.
+  No NTFS-3G userspace fallback is needed for this supported kernel.
+* Default candidate identity and login banner to RC4-public; preserve RC1–RC3
+  releases. Do not add formatting tools, automatic mount entries or shares.
+* Hardware mounting/read/write and encrypted or other filesystem formats remain
+  outside build verification; this selection does not cover every USB device.
 
 ## RC3 — 2026-10-31
 
@@ -153,4 +165,4 @@ belong to the subsequent implementation entry above; the environment commit
 itself introduced none of those hardware changes.
 
 <!-- <FILE>CHANGELOG-RT-AC86U.md</FILE> - <DESC>Detailed AC86U fork change record.</DESC> -->
-<!-- <VERS>END OF VERSION: 0.3.2</VERS> -->
+<!-- <VERS>END OF VERSION: 0.3.3</VERS> -->
