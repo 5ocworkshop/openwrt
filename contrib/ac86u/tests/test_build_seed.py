@@ -1,7 +1,7 @@
 # <FILE>contrib/ac86u/tests/test_build_seed.py</FILE> - <DESC>Verify portable seed policy and fail-closed missing hardware profile.</DESC>
-# <VERS>VERSION: 0.2.1</VERS>
-# <WCTX>Prevent fallback to unrelated device images before board support is present.</WCTX>
-# <CLOG>Normalize formatting of the portable environment implementation and acceptance coverage.</CLOG>
+# <VERS>VERSION: 0.2.5</VERS>
+# <WCTX>Verify RC2 identity, nohup, removable storage and usable WireGuard packages.</WCTX>
+# <CLOG>Require the kernel, tools and LuCI WireGuard packages in the portable seed.</CLOG>
 import pathlib
 import subprocess
 import tempfile
@@ -28,6 +28,44 @@ class BuildSeedTests(unittest.TestCase):
             "password=",
         ):
             self.assertNotIn(forbidden, seed)
+
+    def test_seed_includes_removable_storage_support(self):
+        seed = (ROOT / "config.seed").read_text().splitlines()
+        for package in (
+            "block-mount",
+            "kmod-fs-ext4",
+            "kmod-fs-ntfs3",
+            "kmod-usb-storage",
+            "kmod-usb-storage-uas",
+        ):
+            with self.subTest(package=package):
+                self.assertIn(f"CONFIG_PACKAGE_{package}=y", seed)
+
+    def test_seed_includes_wireguard_support(self):
+        seed = (ROOT / "config.seed").read_text().splitlines()
+        for package in ("kmod-wireguard", "wireguard-tools", "luci-proto-wireguard"):
+            with self.subTest(package=package):
+                self.assertIn(f"CONFIG_PACKAGE_{package}=y", seed)
+
+    def test_wrapper_defaults_to_rc2(self):
+        result = subprocess.run(
+            ["make", "-f", str(ROOT / "Makefile"), "help"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertIn("VARIANT=RC2-public", result.stdout)
+        wrapper = (ROOT / "Makefile").read_text().splitlines()
+        self.assertIn("VARIANT ?= RC2-public", wrapper)
+        self.assertIn("BANNER_LABEL ?= ASUS RT-AC86U 25.12.6 RC2-public", wrapper)
+
+    def test_busybox_defaults_include_nohup(self):
+        defaults = (
+            ROOT.parents[1] / "package/utils/busybox/Config-defaults.in"
+        ).read_text()
+        nohup = defaults.split("config BUSYBOX_DEFAULT_NOHUP\n", 1)[1]
+        nohup = nohup.split("\nconfig ", 1)[0]
+        self.assertIn("\tdefault y\n", nohup + "\n")
 
     def test_missing_profile_fails_without_configuration_or_build(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -98,4 +136,4 @@ class BuildSeedTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 # <FILE>contrib/ac86u/tests/test_build_seed.py</FILE> - <DESC>Verify portable seed policy and fail-closed missing hardware profile.</DESC>
-# <VERS>END OF VERSION: 0.2.1</VERS>
+# <VERS>END OF VERSION: 0.2.5</VERS>

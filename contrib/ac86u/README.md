@@ -1,7 +1,7 @@
 <!-- <FILE>contrib/ac86u/README.md</FILE> - <DESC>Portable AC86U build environment and CLI contracts.</DESC> -->
-<!-- <VERS>VERSION: 0.1.1</VERS> -->
-<!-- <WCTX>Keep the public environment independent of private build hosts and hardware changes.</WCTX> -->
-<!-- <CLOG>Link the integrated hardware regression prerequisites and separate native ucode acceptance.</CLOG> -->
+<!-- <VERS>VERSION: 0.1.3</VERS> -->
+<!-- <WCTX>Prepare usable RC2 storage and WireGuard support without operator configuration.</WCTX> -->
+<!-- <CLOG>Define WireGuard package ownership, configuration boundaries and acceptance checks.</CLOG> -->
 
 # AC86U environment
 
@@ -9,7 +9,7 @@ Hardware support is a separate review and commit. This environment refuses confi
 
 ## Module plan and boundaries
 
-The Makefile owns the portable seed/configure/firmware entrypoints, Linux-only PATH and profile guards. It invokes native OpenWrt make in OPENWRT_ROOT (default: this source checkout). It never cleans caches or supplies an external kernel tree. config.seed owns only single-device selection, plain LuCI and ASUS/RT-AC86U identity; normal OpenWrt networking remains upstream-owned. No calibration, credentials, keys, SSIDs or private iPXE inputs belong here. Existing .config is preserved by configure; choose a fresh checkout or reconcile it explicitly.
+The Makefile owns the portable seed/configure/firmware entrypoints, Linux-only PATH and profile guards. It invokes native OpenWrt make in OPENWRT_ROOT (default: this source checkout). It never cleans caches or supplies an external kernel tree. config.seed owns single-device selection, plain LuCI, ASUS/RT-AC86U identity and the explicit removable-storage and WireGuard package sets; normal OpenWrt networking remains upstream-owned. No calibration, credentials, keys, SSIDs or private iPXE inputs belong here. Existing .config is preserved by configure; choose a fresh checkout or reconcile it explicitly.
 
 scripts/fnc_stamp_build_identity.py owns the identity transaction: validated CLI inputs, .config version fields, files/etc/banner, files/usr/lib/ac86u-build.json and .port ownership digests. It consumes native include/version.mk and banner templates. scripts/cls_run_stage.py owns one subprocess and its private log/status lifecycle, without shell expansion. Tests under tests/ own CLI and rendered-template acceptance checks. Neither tool admits compute: operators must use their site scheduler around make.
 
@@ -19,11 +19,86 @@ Run-stage CLI: --run-dir must be new, --cwd must exist, --label names the stage,
 
 Architecture checklist: only contrib/ac86u owns this environment; dependencies point toward native OpenWrt, never private host paths; borrowed cohesive identity transaction (~300 lines) and RunStage class remain together to preserve validation/publication and subprocess lifecycle invariants. Size alone does not justify changing proven logic. The two wrapper tests are adapted from the existing 14 identity tests to the native release layout; runner tests retain their original subprocess acceptance coverage.
 
+## Removable-storage slice
+
+`config.seed` selects `kmod-usb-storage`, `kmod-usb-storage-uas`,
+`kmod-fs-ext4`, `kmod-fs-ntfs3` and `block-mount`. Native package definitions
+own SCSI, journal, checksum and character-set dependencies; the board profile
+continues to own USB controller selection. NTFS3 provides kernel read/write
+support. No alternate filesystem driver, network sharing, disk formatting or
+custom automount policy is added. Operators explicitly configure mount entries;
+existing upgraded-device configuration remains operator-owned.
+
+```text
+AC86U seed -> native Kconfig/package dependencies -> kernel modules + block
+                                                        |
+                                                        v
+                                                 firmware filesystem
+```
+
+```mermaid
+flowchart LR
+  Seed[AC86U seed] --> Dependencies[Native package dependencies]
+  Dependencies --> Modules[Storage and filesystem modules]
+  Dependencies --> Block[block-mount tools]
+  Modules --> Firmware[Firmware filesystem]
+  Block --> Firmware
+```
+
+Implementation ownership: `config.seed` supplies package-selection inputs to
+native `make defconfig`; missing packages or build failures remain native build
+errors. `tests/test_build_seed.py` owns selection regressions. Apply the same
+selections to the existing local `.config`, preserving its identity and other
+choices. Verify dependency normalization and the rebuilt image's manifest,
+modules and mount tool. Actual USB enumeration and NTFS/ext4 read/write tests
+require user-operated hardware; host build checks do not prove them.
+Keep these changes in the existing seed/test layout, not a new driver module.
+The nohup slice is documented in [NOHUP-IMPLEMENTATION.md](NOHUP-IMPLEMENTATION.md).
+
+## WireGuard slice
+
+`config.seed` selects `kmod-wireguard`, `wireguard-tools` and
+`luci-proto-wireguard`. Native OpenWrt packages own kernel crypto/UDP-tunnel
+dependencies, the `wg` command and netifd helper; the existing LuCI feed owns
+the protocol configuration UI. No custom cryptography, VPN daemon or adapter
+is introduced. These packages add availability, not a tunnel: keys, peers,
+interface addresses, routes and firewall permissions remain operator inputs.
+No credentials, enabled interface or firewall rule is added to the image.
+
+```text
+operator LuCI/UCI configuration -> netifd + wg -> kernel WireGuard interface
+```
+
+```mermaid
+flowchart LR
+  Operator[Operator configuration] --> UI[LuCI protocol UI]
+  UI --> Netifd[netifd helper and wg]
+  Netifd --> Kernel[Kernel WireGuard interface]
+```
+
+Implementation stays in `config.seed` and the active local `.config`;
+`tests/test_build_seed.py` owns the package-selection regression. Normalize
+native dependencies, then verify the image manifest, `wireguard.ko`, `wg`,
+netifd protocol helper and LuCI protocol asset. Native package contracts own
+configuration errors and interface lifecycle; no new DTO or FSM is introduced.
+Actual peer handshakes and routing require operator-provided configuration and
+hardware acceptance, outside the build. Record this addition in the RC2 notes.
+
+## RC2 identity
+
+The firmware wrapper's default variant and banner label are RC2-public.
+The existing identity stamper remains the authority for timestamped build IDs,
+manifest fields and managed-file ownership; upstream OpenWrt version/revision
+are unchanged. `tests/test_build_seed.py` checks the public wrapper help default.
+The implementation changes the wrapper defaults and release notes, then verifies
+RC2 in the stamped manifest and rendered firmware banner during image acceptance.
+No identity schema or CLI argument changes are required.
+
 ## Operator commands
 
-Install normal upstream OpenWrt build prerequisites and update/install the pinned release feeds using scripts/feeds before configuring. From the source root run make -f contrib/ac86u/Makefile help. configure starts only when the hardware profile exists and refuses an existing .config. firmware verifies the normalized single-device selection, stamps the identity, normalizes config again and runs native make with preserved caches. JOBS defaults to 1; set it to the scheduler allocation. RUN_DIR defaults to a unique UTC path under .port/runs; explicit directories must be new. BUILD_ID is optional; use a previous exact ID plus a fresh RUN_DIR for deliberate reproduction. BANNER_LABEL defaults to ASUS RT-AC86U 25.12.6 RC1-public. HTTPS is optional: choose packages deliberately after configuration.
+Install normal upstream OpenWrt build prerequisites and update/install the pinned release feeds using scripts/feeds before configuring. From the source root run make -f contrib/ac86u/Makefile help. configure starts only when the hardware profile exists and refuses an existing .config. firmware verifies the normalized single-device selection, stamps the identity, normalizes config again and runs native make with preserved caches. JOBS defaults to 1; set it to the scheduler allocation. RUN_DIR defaults to a unique UTC path under .port/runs; explicit directories must be new. BUILD_ID is optional; use a previous exact ID plus a fresh RUN_DIR for deliberate reproduction. BANNER_LABEL defaults to ASUS RT-AC86U 25.12.6 RC2-public. HTTPS is optional: choose packages deliberately after configuration.
 
 Run make -f contrib/ac86u/Makefile test inside the admitted job. The Kconfig normalization test requires scripts/config/conf and reports a skip until upstream configuration tools exist. The suite also includes the hardware regressions documented in [tests/README.md](tests/README.md); the critical read-only-buffer test requires an explicit prepared pre-871 source baseline and fails clearly when that prerequisite is missing. Native ucode acceptance is a separate documented command requiring its host interpreter/modules. These tests use isolated host fixtures and do not flash or contact a router.
 
 <!-- <FILE>contrib/ac86u/README.md</FILE> - <DESC>Portable AC86U build environment and CLI contracts.</DESC> -->
-<!-- <VERS>END OF VERSION: 0.1.1</VERS> -->
+<!-- <VERS>END OF VERSION: 0.1.3</VERS> -->

@@ -1,3 +1,7 @@
+# <FILE>package/utils/busybox/Config-defaults.in</FILE> - <DESC>Default BusyBox applet policy for firmware builds.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>Include nohup in the fork's default BusyBox applet set.</WCTX>
+# <CLOG>Enable nohup without switching to custom BusyBox configuration.</CLOG>
 config BUSYBOX_DEFAULT_HAVE_DOT_CONFIG
 	bool
 	default y
@@ -741,7 +745,7 @@ config BUSYBOX_DEFAULT_NL
 	default n
 config BUSYBOX_DEFAULT_NOHUP
 	bool
-	default n
+	default y
 config BUSYBOX_DEFAULT_NPROC
 	bool
 	default n
@@ -3252,3 +3256,5 @@ config BUSYBOX_DEFAULT_FEATURE_IPC_SYSLOG_BUFFER_SIZE
 config BUSYBOX_DEFAULT_FEATURE_KMSG_SYSLOG
 	bool
 	default n
+# <FILE>package/utils/busybox/Config-defaults.in</FILE> - <DESC>Default BusyBox applet policy for firmware builds.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>

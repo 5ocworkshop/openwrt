@@ -1,13 +1,31 @@
 <!-- <FILE>CHANGELOG-RT-AC86U.md</FILE> - <DESC>Detailed AC86U fork change record.</DESC> -->
-<!-- <VERS>VERSION: 0.2.1</VERS> -->
-<!-- <WCTX>Record AC86U implementation details in boot order while retaining the environment setup seam.</WCTX> -->
-<!-- <CLOG>Record the shared CFE and hardware implementation with the combined regression results and explicit native ucode limit.</CLOG> -->
+<!-- <VERS>VERSION: 0.3.1</VERS> -->
+<!-- <WCTX>Prepare RC2 with nohup, USB storage/filesystems and configurable WireGuard.</WCTX> -->
+<!-- <CLOG>Record WireGuard kernel, command-line and LuCI support without preconfigured tunnels.</CLOG> -->
 
 # ASUS RT-AC86U changelog
 
 This personal fork starts from official OpenWrt25.12.6. Testing is limited to
 ASUS RT-AC86U hardware revision R1.5; other revisions and models are unverified.
 The experimental-use and warranty notice in README.md applies.
+
+## RC2 — 2026-10-31
+
+* Default candidate identity and login banner to RC2-public while retaining the
+  upstream OpenWrt version/revision and unique timestamped build IDs.
+* Enable BusyBox `nohup` in the default applet set; custom BusyBox configuration
+  is not required.
+* Include USB mass-storage and USB Attached SCSI (UAS) drivers, with native SCSI
+  dependencies, for USB flash drives and compatible storage enclosures.
+* Include ext4 and the kernel NTFS3 read/write filesystem driver, together with
+  their native dependencies and `block-mount` configuration tools.
+* Include the WireGuard kernel module, `wireguard-tools` and LuCI WireGuard
+  protocol support with native crypto and UDP-tunnel dependencies. Do not
+  preconfigure keys, peers, VPN interfaces, routes or firewall permissions.
+* Keep existing USB controller selections. Do not add automatic mount entries,
+  network file sharing, disk formatting or operator-specific storage settings.
+* Reuse native incremental build caches. On-device USB enumeration and ext4/NTFS
+  read/write behavior remain user-operated acceptance checks, not build claims.
 
 ## Hardware support — 2026-10-30
 
@@ -125,4 +143,4 @@ belong to the subsequent implementation entry above; the environment commit
 itself introduced none of those hardware changes.
 
 <!-- <FILE>CHANGELOG-RT-AC86U.md</FILE> - <DESC>Detailed AC86U fork change record.</DESC> -->
-<!-- <VERS>END OF VERSION: 0.2.1</VERS> -->
+<!-- <VERS>END OF VERSION: 0.3.1</VERS> -->

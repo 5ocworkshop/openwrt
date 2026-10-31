@@ -1,15 +1,15 @@
 # <FILE>contrib/ac86u/Makefile</FILE> - <DESC>Portable guarded AC86U native OpenWrt build entrypoints.</DESC>
-# <VERS>VERSION: 0.2.0</VERS>
-# <WCTX>Reuse native OpenWrt caches with explicit single-device and provenance checks.</WCTX>
-# <CLOG>Find profiles in image/Makefile and existing .mk fragments without unmatched-glob errors.</CLOG>
+# <VERS>VERSION: 0.2.1</VERS>
+# <WCTX>Build RC2 candidates with fresh identity and preserved native caches.</WCTX>
+# <CLOG>Default the firmware variant, banner label and help text to RC2-public.</CLOG>
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 .DEFAULT_GOAL := help
 ENV_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 OPENWRT_ROOT ?= $(abspath $(ENV_DIR)/../..)
 JOBS ?= 1
-VARIANT ?= RC1-public
-BANNER_LABEL ?= ASUS RT-AC86U 25.12.6 RC1-public
+VARIANT ?= RC2-public
+BANNER_LABEL ?= ASUS RT-AC86U 25.12.6 RC2-public
 BUILD_ID ?=
 DEFAULT_RUN_DIR := $(OPENWRT_ROOT)/.port/runs/$(shell date -u +%Y%m%dT%H%M%S%NZ)
 RUN_DIR ?= $(DEFAULT_RUN_DIR)
@@ -22,7 +22,7 @@ PROFILE := CONFIG_TARGET_bcm4908_generic_DEVICE_asus_rt-ac86u=y
 
 .PHONY: help check-profile configure check-config firmware test
 help:
-	@printf '%s\n' 'Use make -f contrib/ac86u/Makefile TARGET [KEY=value]' 'configure: seed a new .config; firmware: stamp and build; test: focused CLI tests' 'OPENWRT_ROOT=source JOBS=1 RUN_DIR=new-path BUILD_ID=optional VARIANT=RC1-public' 'BANNER_LABEL=display-text LINUX_PATH=Linux-only-path' 'Run builds and tests inside the required site compute admission.'
+	@printf '%s\n' 'Use make -f contrib/ac86u/Makefile TARGET [KEY=value]' 'configure: seed a new .config; firmware: stamp and build; test: focused CLI tests' 'OPENWRT_ROOT=source JOBS=1 RUN_DIR=new-path BUILD_ID=optional VARIANT=RC2-public' 'BANNER_LABEL=display-text LINUX_PATH=Linux-only-path' 'Run builds and tests inside the required site compute admission.'
 
 check-profile:
 	@shopt -s nullglob; profiles=("$(OPENWRT_ROOT)"/target/linux/bcm4908/image/*.mk); \
@@ -52,4 +52,4 @@ firmware: check-config
 test:
 	@python3 -m unittest discover -s "$(ENV_DIR)/tests" -p 'test_*.py'
 # <FILE>contrib/ac86u/Makefile</FILE> - <DESC>Portable guarded AC86U native OpenWrt build entrypoints.</DESC>
-# <VERS>END OF VERSION: 0.2.0</VERS>
+# <VERS>END OF VERSION: 0.2.1</VERS>
