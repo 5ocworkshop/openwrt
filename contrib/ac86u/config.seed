@@ -1,7 +1,7 @@
 # <FILE>contrib/ac86u/config.seed</FILE> - <DESC>Portable single-device AC86U release seed with plain LuCI.</DESC>
-# <VERS>VERSION: 0.1.2</VERS>
-# <WCTX>Include removable storage and configurable WireGuard support in RC2.</WCTX>
-# <CLOG>Select WireGuard kernel, command-line and LuCI protocol packages without tunnel configuration.</CLOG>
+# <VERS>VERSION: 0.1.3</VERS>
+# <WCTX>Support exFAT USB drives alongside ext4, NTFS3 and WireGuard in RC3.</WCTX>
+# <CLOG>Add the native exFAT filesystem kernel package to the portable seed.</CLOG>
 CONFIG_TARGET_bcm4908=y
 CONFIG_TARGET_bcm4908_generic=y
 CONFIG_TARGET_bcm4908_generic_DEVICE_asus_rt-ac86u=y
@@ -9,6 +9,7 @@ CONFIG_TARGET_bcm4908_generic_DEVICE_asus_rt-ac86u=y
 # CONFIG_TARGET_ALL_PROFILES is not set
 CONFIG_PACKAGE_block-mount=y
 CONFIG_PACKAGE_kmod-fs-ext4=y
+CONFIG_PACKAGE_kmod-fs-exfat=y
 CONFIG_PACKAGE_kmod-fs-ntfs3=y
 CONFIG_PACKAGE_kmod-usb-storage=y
 CONFIG_PACKAGE_kmod-usb-storage-uas=y
@@ -23,4 +24,4 @@ CONFIG_VERSIONOPT=y
 CONFIG_VERSION_MANUFACTURER="ASUS"
 CONFIG_VERSION_PRODUCT="RT-AC86U"
 # <FILE>contrib/ac86u/config.seed</FILE> - <DESC>Portable single-device AC86U release seed with plain LuCI.</DESC>
-# <VERS>END OF VERSION: 0.1.2</VERS>
+# <VERS>END OF VERSION: 0.1.3</VERS>

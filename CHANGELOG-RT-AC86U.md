@@ -1,13 +1,23 @@
 <!-- <FILE>CHANGELOG-RT-AC86U.md</FILE> - <DESC>Detailed AC86U fork change record.</DESC> -->
-<!-- <VERS>VERSION: 0.3.1</VERS> -->
-<!-- <WCTX>Prepare RC2 with nohup, USB storage/filesystems and configurable WireGuard.</WCTX> -->
-<!-- <CLOG>Record WireGuard kernel, command-line and LuCI support without preconfigured tunnels.</CLOG> -->
+<!-- <VERS>VERSION: 0.3.2</VERS> -->
+<!-- <WCTX>Prepare RC3 with the previously unselected exFAT filesystem driver.</WCTX> -->
+<!-- <CLOG>Record exFAT support and RC3 identity while retaining RC2 release history.</CLOG> -->
 
 # ASUS RT-AC86U changelog
 
 This personal fork starts from official OpenWrt25.12.6. Testing is limited to
 ASUS RT-AC86U hardware revision R1.5; other revisions and models are unverified.
 The experimental-use and warranty notice in README.md applies.
+
+## RC3 — 2026-10-31
+
+* Include the native `kmod-fs-exfat` filesystem driver and its NLS-base dependency
+  for exFAT-formatted USB storage. Keep the existing ext4, NTFS3, USB mass-storage,
+  UAS, WireGuard and BusyBox `nohup` selections.
+* Default candidate identity and login banner to RC3-public. No automatic mount
+  entries, formatting tools, network shares or operator-specific settings are added.
+* Preserve the published RC1/RC2 releases. Actual exFAT mounting and read/write
+  behavior require user-operated hardware acceptance after the build.
 
 ## RC2 — 2026-10-31
 
@@ -143,4 +153,4 @@ belong to the subsequent implementation entry above; the environment commit
 itself introduced none of those hardware changes.
 
 <!-- <FILE>CHANGELOG-RT-AC86U.md</FILE> - <DESC>Detailed AC86U fork change record.</DESC> -->
-<!-- <VERS>END OF VERSION: 0.3.1</VERS> -->
+<!-- <VERS>END OF VERSION: 0.3.2</VERS> -->

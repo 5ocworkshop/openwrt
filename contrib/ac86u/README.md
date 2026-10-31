@@ -1,7 +1,7 @@
 <!-- <FILE>contrib/ac86u/README.md</FILE> - <DESC>Portable AC86U build environment and CLI contracts.</DESC> -->
-<!-- <VERS>VERSION: 0.1.3</VERS> -->
-<!-- <WCTX>Prepare usable RC2 storage and WireGuard support without operator configuration.</WCTX> -->
-<!-- <CLOG>Define WireGuard package ownership, configuration boundaries and acceptance checks.</CLOG> -->
+<!-- <VERS>VERSION: 0.1.4</VERS> -->
+<!-- <WCTX>Add exFAT support to the existing removable-storage stack in RC3.</WCTX> -->
+<!-- <CLOG>Document native exFAT ownership and image acceptance while advancing defaults to RC3.</CLOG> -->
 
 # AC86U environment
 
@@ -22,7 +22,7 @@ Architecture checklist: only contrib/ac86u owns this environment; dependencies p
 ## Removable-storage slice
 
 `config.seed` selects `kmod-usb-storage`, `kmod-usb-storage-uas`,
-`kmod-fs-ext4`, `kmod-fs-ntfs3` and `block-mount`. Native package definitions
+`kmod-fs-ext4`, `kmod-fs-ntfs3`, `kmod-fs-exfat` and `block-mount`. Native package definitions
 own SCSI, journal, checksum and character-set dependencies; the board profile
 continues to own USB controller selection. NTFS3 provides kernel read/write
 support. No alternate filesystem driver, network sharing, disk formatting or
@@ -84,21 +84,35 @@ configuration errors and interface lifecycle; no new DTO or FSM is introduced.
 Actual peer handshakes and routing require operator-provided configuration and
 hardware acceptance, outside the build. Record this addition in the RC2 notes.
 
-## RC2 identity
+## RC3 exFAT increment
 
-The firmware wrapper's default variant and banner label are RC2-public.
+The existing seed owns the additional `kmod-fs-exfat=y` package selection;
+native `package/kernel/linux/modules/fs.mk` owns `CONFIG_EXFAT_FS`, UTF-8
+filename handling and the `kmod-nls-base` dependency. No custom filesystem,
+formatting tool, automatic mount entry or sharing service is introduced.
+The existing storage diagram and module boundaries above remain unchanged.
+`tests/test_build_seed.py` owns the seed and RC3-default regressions. Apply the
+selection to the active `.config`, normalize dependencies, and verify
+`exfat.ko`, its autoload entry and package manifest in the actual RC3 image.
+The native filesystem owns mount errors; on-device read/write acceptance
+remains user-operated. Preserve RC1/RC2 release assets and publish RC3 only
+from the committed source after image verification.
+
+## Candidate identity
+
+The firmware wrapper's default variant and banner label are RC3-public.
 The existing identity stamper remains the authority for timestamped build IDs,
 manifest fields and managed-file ownership; upstream OpenWrt version/revision
 are unchanged. `tests/test_build_seed.py` checks the public wrapper help default.
 The implementation changes the wrapper defaults and release notes, then verifies
-RC2 in the stamped manifest and rendered firmware banner during image acceptance.
+RC3 in the stamped manifest and rendered firmware banner during image acceptance.
 No identity schema or CLI argument changes are required.
 
 ## Operator commands
 
-Install normal upstream OpenWrt build prerequisites and update/install the pinned release feeds using scripts/feeds before configuring. From the source root run make -f contrib/ac86u/Makefile help. configure starts only when the hardware profile exists and refuses an existing .config. firmware verifies the normalized single-device selection, stamps the identity, normalizes config again and runs native make with preserved caches. JOBS defaults to 1; set it to the scheduler allocation. RUN_DIR defaults to a unique UTC path under .port/runs; explicit directories must be new. BUILD_ID is optional; use a previous exact ID plus a fresh RUN_DIR for deliberate reproduction. BANNER_LABEL defaults to ASUS RT-AC86U 25.12.6 RC2-public. HTTPS is optional: choose packages deliberately after configuration.
+Install normal upstream OpenWrt build prerequisites and update/install the pinned release feeds using scripts/feeds before configuring. From the source root run make -f contrib/ac86u/Makefile help. configure starts only when the hardware profile exists and refuses an existing .config. firmware verifies the normalized single-device selection, stamps the identity, normalizes config again and runs native make with preserved caches. JOBS defaults to 1; set it to the scheduler allocation. RUN_DIR defaults to a unique UTC path under .port/runs; explicit directories must be new. BUILD_ID is optional; use a previous exact ID plus a fresh RUN_DIR for deliberate reproduction. BANNER_LABEL defaults to ASUS RT-AC86U 25.12.6 RC3-public. HTTPS is optional: choose packages deliberately after configuration.
 
 Run make -f contrib/ac86u/Makefile test inside the admitted job. The Kconfig normalization test requires scripts/config/conf and reports a skip until upstream configuration tools exist. The suite also includes the hardware regressions documented in [tests/README.md](tests/README.md); the critical read-only-buffer test requires an explicit prepared pre-871 source baseline and fails clearly when that prerequisite is missing. Native ucode acceptance is a separate documented command requiring its host interpreter/modules. These tests use isolated host fixtures and do not flash or contact a router.
 
 <!-- <FILE>contrib/ac86u/README.md</FILE> - <DESC>Portable AC86U build environment and CLI contracts.</DESC> -->
-<!-- <VERS>END OF VERSION: 0.1.3</VERS> -->
+<!-- <VERS>END OF VERSION: 0.1.4</VERS> -->

@@ -1,7 +1,7 @@
 # <FILE>contrib/ac86u/tests/test_build_seed.py</FILE> - <DESC>Verify portable seed policy and fail-closed missing hardware profile.</DESC>
-# <VERS>VERSION: 0.2.5</VERS>
-# <WCTX>Verify RC2 identity, nohup, removable storage and usable WireGuard packages.</WCTX>
-# <CLOG>Require the kernel, tools and LuCI WireGuard packages in the portable seed.</CLOG>
+# <VERS>VERSION: 0.2.6</VERS>
+# <WCTX>Verify RC3 exFAT availability while retaining RC2 firmware capabilities.</WCTX>
+# <CLOG>Require the exFAT kernel package and advance candidate identity regression to RC3.</CLOG>
 import pathlib
 import subprocess
 import tempfile
@@ -35,6 +35,7 @@ class BuildSeedTests(unittest.TestCase):
             "block-mount",
             "kmod-fs-ext4",
             "kmod-fs-ntfs3",
+            "kmod-fs-exfat",
             "kmod-usb-storage",
             "kmod-usb-storage-uas",
         ):
@@ -47,17 +48,17 @@ class BuildSeedTests(unittest.TestCase):
             with self.subTest(package=package):
                 self.assertIn(f"CONFIG_PACKAGE_{package}=y", seed)
 
-    def test_wrapper_defaults_to_rc2(self):
+    def test_wrapper_defaults_to_rc3(self):
         result = subprocess.run(
             ["make", "-f", str(ROOT / "Makefile"), "help"],
             capture_output=True,
             text=True,
             check=True,
         )
-        self.assertIn("VARIANT=RC2-public", result.stdout)
+        self.assertIn("VARIANT=RC3-public", result.stdout)
         wrapper = (ROOT / "Makefile").read_text().splitlines()
-        self.assertIn("VARIANT ?= RC2-public", wrapper)
-        self.assertIn("BANNER_LABEL ?= ASUS RT-AC86U 25.12.6 RC2-public", wrapper)
+        self.assertIn("VARIANT ?= RC3-public", wrapper)
+        self.assertIn("BANNER_LABEL ?= ASUS RT-AC86U 25.12.6 RC3-public", wrapper)
 
     def test_busybox_defaults_include_nohup(self):
         defaults = (
@@ -136,4 +137,4 @@ class BuildSeedTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 # <FILE>contrib/ac86u/tests/test_build_seed.py</FILE> - <DESC>Verify portable seed policy and fail-closed missing hardware profile.</DESC>
-# <VERS>END OF VERSION: 0.2.5</VERS>
+# <VERS>END OF VERSION: 0.2.6</VERS>
