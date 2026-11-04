@@ -1,7 +1,7 @@
-# <FILE>package/kernel/mac80211/patches/brcm/875-brcmfmac-ac86u-stock-bringup.patch</FILE> - <DESC>Apply the radio settings the ASUS RT-AC86U firmware sets around AP bring-up, in its order and values; not required for the 2.4 GHz fix (876).</DESC>
-# <VERS>VERSION: 0.1.2</VERS>
-# <WCTX>brcmfmac 2.4 GHz PSM watchdog: apply the ASUS radio settings at AP bring-up.</WCTX>
-# <CLOG>Header only: describe this patch as the RT-AC86U 2.4 GHz stability change. Code unchanged.</CLOG>
+# <FILE>package/kernel/mac80211/patches/brcm/875-brcmfmac-ac86u-stock-bringup.patch</FILE> - <DESC>Apply the radio settings the ASUS RT-AC86U firmware sets around AP bring-up, in its order and values; this carries the 2.4 GHz fix.</DESC>
+# <VERS>VERSION: 0.1.3</VERS>
+# <WCTX>Release RC5 with the 2.4 GHz radio changes and tc.</WCTX>
+# <CLOG>Correct the file description: this patch carries the 2.4 GHz fix.</CLOG>
 
 Subject: [PATCH] brcmfmac: RT-AC86U ASUS-firmware radio bring-up settings
 
@@ -252,5 +252,5 @@ values are Broadcom SDK defaults is unknown.
  
  #ifdef CONFIG_DMI
 
-# <FILE>package/kernel/mac80211/patches/brcm/875-brcmfmac-ac86u-stock-bringup.patch</FILE> - <DESC>Apply the radio settings the ASUS RT-AC86U firmware sets around AP bring-up, in its order and values; not required for the 2.4 GHz fix (876).</DESC>
-# <VERS>END OF VERSION: 0.1.2</VERS>
+# <FILE>package/kernel/mac80211/patches/brcm/875-brcmfmac-ac86u-stock-bringup.patch</FILE> - <DESC>Apply the radio settings the ASUS RT-AC86U firmware sets around AP bring-up, in its order and values; this carries the 2.4 GHz fix.</DESC>
+# <VERS>END OF VERSION: 0.1.3</VERS>

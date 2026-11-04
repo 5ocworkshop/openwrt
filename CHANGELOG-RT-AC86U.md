@@ -1,7 +1,7 @@
 <!-- <FILE>CHANGELOG-RT-AC86U.md</FILE> - <DESC>Detailed AC86U fork change record.</DESC> -->
-<!-- <VERS>VERSION: 0.4.2</VERS> -->
-<!-- <WCTX>Prepare RC5 with the 2.4 GHz radio changes and tc.</WCTX> -->
-<!-- <CLOG>Name /proc/version as where the kernel build identity appears.</CLOG> -->
+<!-- <VERS>VERSION: 0.4.3</VERS> -->
+<!-- <WCTX>Release RC5 with the 2.4 GHz radio changes and tc.</WCTX> -->
+<!-- <CLOG>Date the RC5 section and record what was tested on hardware.</CLOG> -->
 
 # ASUS RT-AC86U changelog
 
@@ -9,11 +9,10 @@ This personal fork starts from official OpenWrt25.12.6. Testing is limited to
 ASUS RT-AC86U hardware revision R1.5; other revisions and models are unverified.
 The experimental-use and warranty notice in README.md applies.
 
-## RC5 — unreleased
+## RC5 — 2026-11-04
 
-Planned contents. Not built or flashed yet; this line goes when RC5 is verified.
-
-* Fix the 2.4 GHz radio: clients no longer lose the link and fail DHCP once they
+* Fix the 2.4 GHz radio; the stability issues appear to be resolved, and testing
+  feedback is appreciated. Clients no longer lose the link and fail DHCP once they
   pass traffic, a failure caused by repeated d11 PSM watchdog resets. Patch 875
   sends the radio settings the ASUS RT-AC86U firmware uses when an AP starts,
   including the 2.4 GHz setting this fix depends on. Radios keep the OpenWrt
@@ -26,7 +25,7 @@ Planned contents. Not built or flashed yet; this line goes when RC5 is verified.
   CA/987. The device tree no longer hard-codes one country for every unit.
 * `ac86u-radio-nvram` starts each radio file with `wlunit` and copies the global
   `boardrev` to a radio without its own.
-* Include `tc-full` and `kmod-sched-core` for traffic control and DSA port
+* Include `tc-full` and `kmod-sched-core` for traffic control and port
   mirroring. These turn on `CONFIG_NET_CLS_ACT` and `CONFIG_NET_EMATCH` in the
   kernel; `act_mirred` is a module. `libxtables`, `libbpf` and `libelf` come in
   as dependencies.
@@ -34,6 +33,9 @@ Planned contents. Not built or flashed yet; this line goes when RC5 is verified.
   the boot log.
 * Default candidate identity and login banner to RC5-public; preserve RC1–RC4
   releases.
+* On the development unit this image boots with `vht_features` 7 on 2.4 GHz and
+  6 on 5 GHz and no watchdog resets. Wi-Fi client stability and throughput on
+  this exact image, and port mirroring, are not yet tested.
 
 ## RC4 — 2026-10-31
 
@@ -191,4 +193,4 @@ belong to the subsequent implementation entry above; the environment commit
 itself introduced none of those hardware changes.
 
 <!-- <FILE>CHANGELOG-RT-AC86U.md</FILE> - <DESC>Detailed AC86U fork change record.</DESC> -->
-<!-- <VERS>END OF VERSION: 0.4.2</VERS> -->
+<!-- <VERS>END OF VERSION: 0.4.3</VERS> -->
