@@ -1,7 +1,7 @@
 <!-- <FILE>CHANGELOG-RT-AC86U.md</FILE> - <DESC>Detailed AC86U fork change record.</DESC> -->
-<!-- <VERS>VERSION: 0.4.0</VERS> -->
+<!-- <VERS>VERSION: 0.4.1</VERS> -->
 <!-- <WCTX>Prepare RC5 with the 2.4 GHz radio changes and tc.</WCTX> -->
-<!-- <CLOG>Add the RC5 section.</CLOG> -->
+<!-- <CLOG>Record the fixed kernel build identity in RC5.</CLOG> -->
 
 # ASUS RT-AC86U changelog
 
@@ -30,6 +30,8 @@ Planned contents. Not built or flashed yet; this line goes when RC5 is verified.
   mirroring. These turn on `CONFIG_NET_CLS_ACT` and `CONFIG_NET_EMATCH` in the
   kernel; `act_mirred` is a module. `libxtables`, `libbpf` and `libelf` come in
   as dependencies.
+* Report a fixed kernel build identity, `user@UserPC`, in `uname -v` and
+  `/proc/version`.
 * Default candidate identity and login banner to RC5-public; preserve RC1–RC4
   releases.
 
@@ -189,4 +191,4 @@ belong to the subsequent implementation entry above; the environment commit
 itself introduced none of those hardware changes.
 
 <!-- <FILE>CHANGELOG-RT-AC86U.md</FILE> - <DESC>Detailed AC86U fork change record.</DESC> -->
-<!-- <VERS>END OF VERSION: 0.4.0</VERS> -->
+<!-- <VERS>END OF VERSION: 0.4.1</VERS> -->

@@ -1,7 +1,7 @@
 # <FILE>contrib/ac86u/tests/test_build_seed.py</FILE> - <DESC>Verify portable seed policy and fail-closed missing hardware profile.</DESC>
-# <VERS>VERSION: 0.2.8</VERS>
-# <WCTX>Verify the RC5 selection: tc and the radio bring-up patches.</WCTX>
-# <CLOG>Require tc and 875's 2.4 GHz setting, and advance candidate identity to RC5.</CLOG>
+# <VERS>VERSION: 0.2.9</VERS>
+# <WCTX>Verify the RC5 selection: tc, the radio bring-up patches and a fixed kernel build identity.</WCTX>
+# <CLOG>Require a fixed kernel build user and host in the seed.</CLOG>
 import pathlib
 import subprocess
 import tempfile
@@ -54,6 +54,11 @@ class BuildSeedTests(unittest.TestCase):
         for package in ("kmod-sched-core", "tc-full"):
             with self.subTest(package=package):
                 self.assertIn(f"CONFIG_PACKAGE_{package}=y", seed)
+
+    def test_seed_fixes_kernel_build_identity(self):
+        seed = (ROOT / "config.seed").read_text().splitlines()
+        self.assertIn('CONFIG_KERNEL_BUILD_USER="user"', seed)
+        self.assertIn('CONFIG_KERNEL_BUILD_DOMAIN="UserPC"', seed)
 
     def test_radio_bringup_sets_2g_value(self):
         patches = ROOT.parents[1] / "package/kernel/mac80211/patches/brcm"
@@ -149,4 +154,4 @@ class BuildSeedTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 # <FILE>contrib/ac86u/tests/test_build_seed.py</FILE> - <DESC>Verify portable seed policy and fail-closed missing hardware profile.</DESC>
-# <VERS>END OF VERSION: 0.2.8</VERS>
+# <VERS>END OF VERSION: 0.2.9</VERS>
