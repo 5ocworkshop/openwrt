@@ -1,7 +1,7 @@
 <!-- <FILE>contrib/ac86u/README.md</FILE> - <DESC>Portable AC86U build environment and CLI contracts.</DESC> -->
-<!-- <VERS>VERSION: 0.1.5</VERS> -->
-<!-- <WCTX>Complete the selected common USB filesystem set with FAT32/vfat in RC4.</WCTX> -->
-<!-- <CLOG>Document native FAT/VFAT and NLS dependency ownership and advance identity to RC4.</CLOG> -->
+<!-- <VERS>VERSION: 0.1.6</VERS> -->
+<!-- <WCTX>Add the 2.4 GHz radio changes and tc in RC5.</WCTX> -->
+<!-- <CLOG>Document the RC5 radio and tc increment and advance identity to RC5.</CLOG> -->
 
 # AC86U environment
 
@@ -112,14 +112,24 @@ own mount errors. Common unencrypted FAT32/exFAT/NTFS USB drives are the target,
 not every filesystem or USB device; hardware mounting/read/write remains
 user-operated. Preserve the published RC1–RC3 releases when publishing RC4.
 
+## RC5 radio and tc increment
+
+Patches 873-875 in `package/kernel/mac80211/patches/brcm/` keep each radio's
+country and send the ASUS radio settings at AP bring-up, which stops the
+2.4 GHz PSM watchdog. The seed adds `kmod-sched-core` and `tc-full`, which turn
+on `CONFIG_NET_CLS_ACT` and `CONFIG_NET_EMATCH`. Radios keep the OpenWrt
+firmware. Image acceptance checks the package manifest for both packages and
+a 2.4 GHz client passing traffic. Preserve the published RC1–RC4 releases when
+publishing RC5.
+
 ## Candidate identity
 
-The firmware wrapper's default variant and banner label are RC4-public.
+The firmware wrapper's default variant and banner label are RC5-public.
 The existing identity stamper remains the authority for timestamped build IDs,
 manifest fields and managed-file ownership; upstream OpenWrt version/revision
 are unchanged. `tests/test_build_seed.py` checks the public wrapper help default.
 The implementation changes the wrapper defaults and release notes, then verifies
-RC4 in the stamped manifest and rendered firmware banner during image acceptance.
+RC5 in the stamped manifest and rendered firmware banner during image acceptance.
 No identity schema or CLI argument changes are required.
 
 ## Operator commands
@@ -129,4 +139,4 @@ Install normal upstream OpenWrt build prerequisites and update/install the pinne
 Run make -f contrib/ac86u/Makefile test inside the admitted job. The Kconfig normalization test requires scripts/config/conf and reports a skip until upstream configuration tools exist. The suite also includes the hardware regressions documented in [tests/README.md](tests/README.md); the critical read-only-buffer test requires an explicit prepared pre-871 source baseline and fails clearly when that prerequisite is missing. Native ucode acceptance is a separate documented command requiring its host interpreter/modules. These tests use isolated host fixtures and do not flash or contact a router.
 
 <!-- <FILE>contrib/ac86u/README.md</FILE> - <DESC>Portable AC86U build environment and CLI contracts.</DESC> -->
-<!-- <VERS>END OF VERSION: 0.1.5</VERS> -->
+<!-- <VERS>END OF VERSION: 0.1.6</VERS> -->

@@ -1,7 +1,7 @@
 # <FILE>contrib/ac86u/tests/test_build_seed.py</FILE> - <DESC>Verify portable seed policy and fail-closed missing hardware profile.</DESC>
-# <VERS>VERSION: 0.2.7</VERS>
-# <WCTX>Verify the FAT/vfat, exFAT, NTFS3 and ext4 selection in RC4.</WCTX>
-# <CLOG>Require the FAT/VFAT package and advance candidate identity regression to RC4.</CLOG>
+# <VERS>VERSION: 0.2.8</VERS>
+# <WCTX>Verify the RC5 selection: tc and the radio bring-up patches.</WCTX>
+# <CLOG>Require tc and 875's 2.4 GHz setting, and advance candidate identity to RC5.</CLOG>
 import pathlib
 import subprocess
 import tempfile
@@ -49,17 +49,28 @@ class BuildSeedTests(unittest.TestCase):
             with self.subTest(package=package):
                 self.assertIn(f"CONFIG_PACKAGE_{package}=y", seed)
 
-    def test_wrapper_defaults_to_rc4(self):
+    def test_seed_includes_traffic_control(self):
+        seed = (ROOT / "config.seed").read_text().splitlines()
+        for package in ("kmod-sched-core", "tc-full"):
+            with self.subTest(package=package):
+                self.assertIn(f"CONFIG_PACKAGE_{package}=y", seed)
+
+    def test_radio_bringup_sets_2g_value(self):
+        patches = ROOT.parents[1] / "package/kernel/mac80211/patches/brcm"
+        bringup = (patches / "875-brcmfmac-ac86u-stock-bringup.patch").read_text()
+        self.assertIn('"vht_features", is_2g ? 7 : 6', bringup)
+
+    def test_wrapper_defaults_to_rc5(self):
         result = subprocess.run(
             ["make", "-f", str(ROOT / "Makefile"), "help"],
             capture_output=True,
             text=True,
             check=True,
         )
-        self.assertIn("VARIANT=RC4-public", result.stdout)
+        self.assertIn("VARIANT=RC5-public", result.stdout)
         wrapper = (ROOT / "Makefile").read_text().splitlines()
-        self.assertIn("VARIANT ?= RC4-public", wrapper)
-        self.assertIn("BANNER_LABEL ?= ASUS RT-AC86U 25.12.6 RC4-public", wrapper)
+        self.assertIn("VARIANT ?= RC5-public", wrapper)
+        self.assertIn("BANNER_LABEL ?= ASUS RT-AC86U 25.12.6 RC5-public", wrapper)
 
     def test_busybox_defaults_include_nohup(self):
         defaults = (
@@ -138,4 +149,4 @@ class BuildSeedTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 # <FILE>contrib/ac86u/tests/test_build_seed.py</FILE> - <DESC>Verify portable seed policy and fail-closed missing hardware profile.</DESC>
-# <VERS>END OF VERSION: 0.2.7</VERS>
+# <VERS>END OF VERSION: 0.2.8</VERS>

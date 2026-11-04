@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
 // <FILE>target/linux/bcm4908/dts/bcm4906-asus-rt-ac86u.dts</FILE> - <DESC>RT-AC86U Ethernet board candidate with live-verified NAND and MAC layout.</DESC>
-// <VERS>VERSION: 0.9.1</VERS>
-// <WCTX>Reproduce the stock PCI-zero RAM view using the upstream PCIe driver's BAR2 mapping.</WCTX>
-// <CLOG>Describe WAN-red startup ownership consistently with the carrier/default-route handoff policy.</CLOG>
+// <VERS>VERSION: 0.10.1</VERS>
+// <WCTX>brcmfmac S3 equivalency image: take each unit's country from its own radio nvram.</WCTX>
+// <CLOG>Removed the brcm,ccode-map on both radios: it hard-codes one country for every unit.</CLOG>
 
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
@@ -339,4 +339,4 @@
 };
 
 // <FILE>target/linux/bcm4908/dts/bcm4906-asus-rt-ac86u.dts</FILE> - <DESC>RT-AC86U Ethernet board candidate with live-verified NAND and MAC layout.</DESC>
-// <VERS>END OF VERSION: 0.9.1</VERS>
+// <VERS>END OF VERSION: 0.10.1</VERS>

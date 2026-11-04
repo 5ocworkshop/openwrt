@@ -1,13 +1,37 @@
 <!-- <FILE>CHANGELOG-RT-AC86U.md</FILE> - <DESC>Detailed AC86U fork change record.</DESC> -->
-<!-- <VERS>VERSION: 0.3.3</VERS> -->
-<!-- <WCTX>Prepare RC4 with FAT32/vfat and the retained exFAT, NTFS3 and ext4 drivers.</WCTX> -->
-<!-- <CLOG>Record FAT/VFAT support, native character-set dependencies and RC4 identity.</CLOG> -->
+<!-- <VERS>VERSION: 0.4.0</VERS> -->
+<!-- <WCTX>Prepare RC5 with the 2.4 GHz radio changes and tc.</WCTX> -->
+<!-- <CLOG>Add the RC5 section.</CLOG> -->
 
 # ASUS RT-AC86U changelog
 
 This personal fork starts from official OpenWrt25.12.6. Testing is limited to
 ASUS RT-AC86U hardware revision R1.5; other revisions and models are unverified.
 The experimental-use and warranty notice in README.md applies.
+
+## RC5 — unreleased
+
+Planned contents. Not built or flashed yet; this line goes when RC5 is verified.
+
+* Fix the 2.4 GHz radio: clients no longer lose the link and fail DHCP once they
+  pass traffic, a failure caused by repeated d11 PSM watchdog resets. Patch 875
+  sends the radio settings the ASUS RT-AC86U firmware uses when an AP starts,
+  including the 2.4 GHz setting this fix depends on. Radios keep the OpenWrt
+  firmware 10.28.2.
+* Patch 873 skips the OpenWrt country-code interception on this board, so the
+  firmware uses the country from the unit's own radio settings.
+* Patch 874 repeats the ASUS PCIe coherency write before firmware download. Tests
+  with and without it showed no difference; it stays in the series.
+* Each radio keeps its own `ccode` and `regrev`. A radio with no `ccode` gets
+  CA/987. The device tree no longer hard-codes one country for every unit.
+* `ac86u-radio-nvram` starts each radio file with `wlunit` and copies the global
+  `boardrev` to a radio without its own.
+* Include `tc-full` and `kmod-sched-core` for traffic control and DSA port
+  mirroring. These turn on `CONFIG_NET_CLS_ACT` and `CONFIG_NET_EMATCH` in the
+  kernel; `act_mirred` is a module. `libxtables`, `libbpf` and `libelf` come in
+  as dependencies.
+* Default candidate identity and login banner to RC5-public; preserve RC1–RC4
+  releases.
 
 ## RC4 — 2026-10-31
 
@@ -165,4 +189,4 @@ belong to the subsequent implementation entry above; the environment commit
 itself introduced none of those hardware changes.
 
 <!-- <FILE>CHANGELOG-RT-AC86U.md</FILE> - <DESC>Detailed AC86U fork change record.</DESC> -->
-<!-- <VERS>END OF VERSION: 0.3.3</VERS> -->
+<!-- <VERS>END OF VERSION: 0.4.0</VERS> -->

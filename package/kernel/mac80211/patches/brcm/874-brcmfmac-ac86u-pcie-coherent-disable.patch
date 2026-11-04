@@ -1,0 +1,73 @@
+# <FILE>package/kernel/mac80211/patches/brcm/874-brcmfmac-ac86u-pcie-coherent-disable.patch</FILE> - <DESC>Repeat the stock DHD PCIe coherency write on RT-AC86U before firmware download and each watchdog reset.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>brcmfmac S3 equivalency image: give each radio the firmware-load inputs stock DHD sends.</WCTX>
+# <CLOG>New: hnd_hw_coherent_disable equivalent (BAR0 window 0x18304000, register 0 cleared, window restored) for chips 0x4365/0x4366/43664/43666 on asus,rt-ac86u.</CLOG>
+
+Subject: [PATCH] brcmfmac: RT-AC86U stock PCIe coherency write
+
+Stock DHD calls hnd_hw_coherent_disable for the 4365/4366 and 43664/43666
+chips before it halts the ARM for firmware download, and again before every
+PCIe watchdog reset: it points the BAR0 window at 0x18304000, writes zero to
+the first register there and restores the previous core window.
+brcmfmac has no equivalent. Do the same write at the same two points, only
+on asus,rt-ac86u and only for those chips.
+
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+@@ -16,6 +16,7 @@
+ #include <linux/kthread.h>
+ #include <linux/io.h>
+ #include <linux/random.h>
++#include <linux/of.h>
+ #include <linux/unaligned.h>
+ 
+ #include <soc.h>
+@@ -653,6 +654,29 @@
+ }
+ 
+ 
++/* Stock DHD hnd_hw_coherent_disable for the 4365/4366 family on RT-AC86U:
++ * point BAR0 at 0x18304000, clear its first register, restore the window.
++ */
++static void brcmf_pcie_ac86u_coherent_disable(struct brcmf_pciedev_info *devinfo)
++{
++	const struct pci_dev *pdev = devinfo->pdev;
++	u32 chip = devinfo->ci->chip;
++	u32 bar0_win;
++
++	if (!of_machine_is_compatible("asus,rt-ac86u"))
++		return;
++	if (chip != BRCM_CC_4365_CHIP_ID && chip != BRCM_CC_4366_CHIP_ID &&
++	    chip != BRCM_CC_43664_CHIP_ID && chip != BRCM_CC_43666_CHIP_ID)
++		return;
++
++	pci_read_config_dword(pdev, BRCMF_PCIE_BAR0_WINDOW, &bar0_win);
++	pci_write_config_dword(pdev, BRCMF_PCIE_BAR0_WINDOW, 0x18304000);
++	wmb();
++	brcmf_pcie_write_reg32(devinfo, 0, 0);
++	pci_write_config_dword(pdev, BRCMF_PCIE_BAR0_WINDOW, bar0_win);
++}
++
++
+ static void brcmf_pcie_reset_device(struct brcmf_pciedev_info *devinfo)
+ {
+ 	struct brcmf_core *core;
+@@ -685,6 +709,7 @@
+ 			       val);
+ 
+ 	/* Watchdog reset */
++	brcmf_pcie_ac86u_coherent_disable(devinfo);
+ 	brcmf_pcie_select_core(devinfo, BCMA_CORE_CHIPCOMMON);
+ 	WRITECC32(devinfo, watchdog, 4);
+ 	msleep(100);
+@@ -1702,6 +1727,7 @@
+ 	u32 address;
+ 	u32 resetintr;
+ 
++	brcmf_pcie_ac86u_coherent_disable(devinfo);
+ 	brcmf_dbg(PCIE, "Halt ARM.\n");
+ 	err = brcmf_pcie_enter_download_state(devinfo);
+ 	if (err)
+
+# <FILE>package/kernel/mac80211/patches/brcm/874-brcmfmac-ac86u-pcie-coherent-disable.patch</FILE> - <DESC>Repeat the stock DHD PCIe coherency write on RT-AC86U before firmware download and each watchdog reset.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>

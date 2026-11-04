@@ -1,7 +1,7 @@
 # <FILE>contrib/ac86u/config.seed</FILE> - <DESC>Portable single-device AC86U release seed with plain LuCI.</DESC>
-# <VERS>VERSION: 0.1.4</VERS>
-# <WCTX>Include FAT32/vfat alongside exFAT, NTFS3 and ext4 in RC4.</WCTX>
-# <CLOG>Add the native FAT/VFAT kernel package and its character-set dependencies.</CLOG>
+# <VERS>VERSION: 0.1.5</VERS>
+# <WCTX>Include tc and its kernel scheduler support in RC5.</WCTX>
+# <CLOG>Add kmod-sched-core and tc-full.</CLOG>
 CONFIG_TARGET_bcm4908=y
 CONFIG_TARGET_bcm4908_generic=y
 CONFIG_TARGET_bcm4908_generic_DEVICE_asus_rt-ac86u=y
@@ -17,6 +17,8 @@ CONFIG_PACKAGE_kmod-usb-storage-uas=y
 CONFIG_PACKAGE_kmod-wireguard=y
 CONFIG_PACKAGE_wireguard-tools=y
 CONFIG_PACKAGE_luci-proto-wireguard=y
+CONFIG_PACKAGE_kmod-sched-core=y
+CONFIG_PACKAGE_tc-full=y
 CONFIG_PACKAGE_luci=y
 # CONFIG_PACKAGE_luci-ssl is not set
 # CONFIG_PACKAGE_luci-ssl-openssl is not set
@@ -25,4 +27,4 @@ CONFIG_VERSIONOPT=y
 CONFIG_VERSION_MANUFACTURER="ASUS"
 CONFIG_VERSION_PRODUCT="RT-AC86U"
 # <FILE>contrib/ac86u/config.seed</FILE> - <DESC>Portable single-device AC86U release seed with plain LuCI.</DESC>
-# <VERS>END OF VERSION: 0.1.4</VERS>
+# <VERS>END OF VERSION: 0.1.5</VERS>

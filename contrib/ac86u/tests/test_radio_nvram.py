@@ -1,10 +1,11 @@
 # <FILE>contrib/ac86u/tests/test_radio_nvram.py</FILE> - <DESC>Native shell contracts for private per-device radio provisioning.</DESC>
-# <VERS>VERSION: 0.1.2</VERS>
-# <WCTX>Provision stock brcmfmac from each router's preserved settings without embedding values.</WCTX>
-# <CLOG>Port the focused hardware regression to native OpenWrt source paths.</CLOG>
+# <VERS>VERSION: 0.4.0</VERS>
+# <WCTX>brcmfmac S3 equivalency image: take each unit's country from its own radio nvram.</WCTX>
+# <CLOG>Own ccode/regrev rows are copied unchanged; a radio without ccode gets ccode=CA and regrev=987 appended, without duplicating its own regrev.</CLOG>
 
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -19,8 +20,10 @@ HELPER = (
 PREFIX = "brcmfmac4366c-pcie.asus,rt-ac86u-radio"
 
 
-def fixture():
+def fixture(boardrev="0x1102"):
     rows = ["http_passwd=excluded-private-value", "wl0_ssid=excluded-private-value"]
+    if boardrev is not None:
+        rows.append(f"boardrev={boardrev}")
     for radio, board, device in [(0, "0x0797", "0x43c4"), (1, "0x0798", "0x43c5")]:
         rows.extend(
             f"{radio}:{key}={value}"
@@ -137,7 +140,7 @@ class RadioNvramTests(unittest.TestCase):
         )
         for radio in (0, 1):
             target = self.output / f"{PREFIX}{radio}.txt"
-            expected = (
+            expected = f"wlunit={radio}\nboardrev=0x1102\n" + (
                 "\n".join(
                     line[2:]
                     for line in fixture().splitlines()
@@ -148,6 +151,108 @@ class RadioNvramTests(unittest.TestCase):
             self.assertEqual(target.read_text(), expected)
             self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
         self.assertNotIn("excluded-private-value", result.stdout + result.stderr)
+
+    def radio_text(self, radio):
+        return (self.output / f"{PREFIX}{radio}.txt").read_text()
+
+    def test_global_boardrev_is_copied_first_into_both_radios(self):
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for radio in (0, 1):
+            lines = self.radio_text(radio).splitlines()
+            self.assertEqual(lines[1], "boardrev=0x1102")
+            self.assertEqual(sum(line.startswith("boardrev=") for line in lines), 1)
+        self.assertIn(
+            "boardrev: global row copied where a radio has none", result.stdout
+        )
+
+    def test_per_radio_boardrev_takes_precedence_over_global_row(self):
+        self.source.write_text(fixture() + "1:boardrev=0x1203\n")
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.radio_text(0).splitlines()[1], "boardrev=0x1102")
+        radio1 = self.radio_text(1).splitlines()
+        self.assertEqual(
+            [row for row in radio1 if row.startswith("boardrev=")], ["boardrev=0x1203"]
+        )
+
+    def test_absent_global_boardrev_adds_nothing(self):
+        self.source.write_text(fixture(boardrev=None))
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for radio in (0, 1):
+            self.assertNotIn("boardrev=", self.radio_text(radio))
+        self.assertIn("boardrev: global row absent", result.stdout)
+
+    def test_wlunit_is_the_first_line_of_each_radio_file(self):
+        for data in (fixture(), fixture(boardrev=None)):
+            with self.subTest(boardrev=("boardrev=" in data)):
+                shutil.rmtree(self.output, ignore_errors=True)
+                Path(str(self.output) + ".owner").unlink(missing_ok=True)
+                self.source.write_text(data)
+                result = self.run_cli()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for radio in (0, 1):
+                    lines = self.radio_text(radio).splitlines()
+                    self.assertEqual(lines[0], f"wlunit={radio}")
+                    self.assertEqual(
+                        sum(line.startswith("wlunit=") for line in lines), 1
+                    )
+
+    def test_radio_wlunit_row_is_rejected(self):
+        self.source.write_text(fixture() + "0:wlunit=1\n")
+        result = self.run_cli()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
+
+    def test_malformed_or_duplicate_global_boardrev_fails(self):
+        for data in (
+            fixture(boardrev="excluded-private-value"),
+            fixture(boardrev=""),
+            fixture() + "boardrev=0x1102\n",
+        ):
+            with self.subTest(data=data[-20:]):
+                self.source.write_text(data)
+                result = self.run_cli()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.output.exists())
+                self.assertNotIn(
+                    "excluded-private-value", result.stdout + result.stderr
+                )
+
+    def test_own_ccode_and_regrev_are_copied_without_default(self):
+        self.source.write_text(fixture() + "0:regrev=4\n")
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        radio0 = self.radio_text(0).splitlines()
+        self.assertEqual([r for r in radio0 if r.startswith("ccode=")], ["ccode=GB"])
+        self.assertEqual([r for r in radio0 if r.startswith("regrev=")], ["regrev=4"])
+        radio1 = self.radio_text(1).splitlines()
+        self.assertEqual([r for r in radio1 if r.startswith("ccode=")], ["ccode=GB"])
+        self.assertFalse(any(r.startswith("regrev=") for r in radio1))
+        self.assertIn("ccode: radio0 own, radio1 own", result.stdout)
+
+    def test_missing_ccode_gets_ca_987_default_on_that_radio_only(self):
+        self.source.write_text(fixture().replace("1:ccode=GB\n", ""))
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            [r for r in self.radio_text(0).splitlines() if r[:6] in ("ccode=", "regrev")],
+            ["ccode=GB"],
+        )
+        radio1 = self.radio_text(1).splitlines()
+        self.assertEqual(radio1[-2:], ["ccode=CA", "regrev=987"])
+        self.assertEqual(sum(r.startswith("ccode=") for r in radio1), 1)
+        self.assertIn("ccode: radio0 own, radio1 default CA/987", result.stdout)
+
+    def test_missing_ccode_keeps_own_regrev_without_duplicate(self):
+        data = fixture().replace("0:ccode=GB\n", "") + "0:regrev=5\n"
+        self.source.write_text(data)
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        radio0 = self.radio_text(0).splitlines()
+        self.assertEqual([r for r in radio0 if r.startswith("ccode=")], ["ccode=CA"])
+        self.assertEqual([r for r in radio0 if r.startswith("regrev=")], ["regrev=5"])
 
     def test_dry_run_and_other_board_do_not_publish(self):
         result = self.run_cli("--dry-run")
@@ -357,4 +462,4 @@ if __name__ == "__main__":
     unittest.main()
 
 # <FILE>contrib/ac86u/tests/test_radio_nvram.py</FILE> - <DESC>Native shell contracts for private per-device radio provisioning.</DESC>
-# <VERS>END OF VERSION: 0.1.2</VERS>
+# <VERS>END OF VERSION: 0.4.0</VERS>

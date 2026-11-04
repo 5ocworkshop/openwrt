@@ -1,0 +1,256 @@
+# <FILE>package/kernel/mac80211/patches/brcm/875-brcmfmac-ac86u-stock-bringup.patch</FILE> - <DESC>Apply the radio settings the ASUS RT-AC86U firmware sets around AP bring-up, in its order and values; not required for the 2.4 GHz fix (876).</DESC>
+# <VERS>VERSION: 0.1.2</VERS>
+# <WCTX>brcmfmac 2.4 GHz PSM watchdog: apply the ASUS radio settings at AP bring-up.</WCTX>
+# <CLOG>Header only: describe this patch as the RT-AC86U 2.4 GHz stability change. Code unchanged.</CLOG>
+
+Subject: [PATCH] brcmfmac: RT-AC86U ASUS-firmware radio bring-up settings
+
+On the ASUS RT-AC86U firmware, wlconf and rc set a list of radio settings
+that brcmfmac never sends. Send the same settings on the primary AP start
+of the RT-AC86U radios: the band, country and bandwidth rows before the
+chanspec, the remaining down-state rows after it, and the post-up rows
+after BRCMF_C_UP. Order and values follow the ASUS firmware. Unsupported
+settings are logged and ignored, as the ASUS firmware does.
+
+Without these settings the d11 PSM watchdog fires on the 2.4 GHz radio once
+a client passes traffic, and the client never completes DHCP. Whether these
+values are Broadcom SDK defaults is unknown.
+
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -5291,18 +5291,22 @@
+ 			/* Firmware 10.x requires setting channel after enabling
+ 			 * AP and before bringing interface up.
+ 			 */
++			brcmf_c_ac86u_bringup(ifp, BRCMF_AC86U_PRE_CHANSPEC);
+ 			err = brcmf_fil_iovar_int_set(ifp, "chanspec", chanspec);
+ 			if (err < 0) {
+ 				bphy_err(drvr, "Set Channel failed: chspec=%d, %d\n",
+ 					 chanspec, err);
+ 				goto exit;
+ 			}
++			brcmf_c_ac86u_bringup(ifp, BRCMF_AC86U_DOWN);
+ 		}
+ 		err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_UP, 1);
+ 		if (err < 0) {
+ 			bphy_err(drvr, "BRCMF_C_UP error (%d)\n", err);
+ 			goto exit;
+ 		}
++		if (!mbss)
++			brcmf_c_ac86u_bringup(ifp, BRCMF_AC86U_UP);
+ 
+ 		if (crypto->psk) {
+ 			brcmf_dbg(INFO, "using PSK offload\n");
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c
+@@ -349,6 +349,190 @@
+ 	brcmf_c_set_ac86u_led(ifp, false);
+ }
+ 
++/* RT-AC86U: radio settings stock wlconf and rc apply (BRINGUP_DIFF.md). */
++#define AC86U_C_SET_RATESET			72
++#define AC86U_C_SET_PLCPHDR			36
++#define AC86U_C_SET_GMODE			110
++#define AC86U_C_SET_BAND			142
++#define AC86U_C_SET_GMODE_PROT_OVERRIDE		151
++#define AC86U_C_SET_PROTECTION_CONTROL		179
++
++static void brcmf_c_ac86u_warn(struct brcmf_if *ifp, const char *what, int err)
++{
++	if (err)
++		dev_warn(ifp->drvr->bus_if->dev, "RT-AC86U %s: %d (ignored)\n",
++			 what, err);
++}
++
++static void brcmf_c_ac86u_int(struct brcmf_if *ifp, const char *name, s32 val)
++{
++	brcmf_c_ac86u_warn(ifp, name, brcmf_fil_iovar_int_set(ifp, name, val));
++}
++
++static void brcmf_c_ac86u_cmd(struct brcmf_if *ifp, u32 cmd, s32 val)
++{
++	char what[16];
++
++	snprintf(what, sizeof(what), "ioctl %u", cmd);
++	brcmf_c_ac86u_warn(ifp, what, brcmf_fil_cmd_int_set(ifp, cmd, val));
++}
++
++static void brcmf_c_ac86u_data(struct brcmf_if *ifp, const char *name,
++			       void *data, u32 len)
++{
++	brcmf_c_ac86u_warn(ifp, name,
++			   brcmf_fil_iovar_data_set(ifp, name, data, len));
++}
++
++static void brcmf_c_ac86u_band_country(struct brcmf_if *ifp, bool is_2g)
++{
++	struct brcmf_fil_country_le ccreq = {
++		.country_abbrev = "CA",
++		.rev = cpu_to_le32(987),
++		.ccode = "CA",
++	};
++	struct brcmf_fil_bwcap_le bw = {
++		.band = cpu_to_le32(WLC_BAND_5G),
++		.bw_cap = cpu_to_le32(7),
++	};
++
++	brcmf_c_ac86u_warn(ifp, "dwds",
++			   brcmf_fil_bsscfg_int_set(ifp, "dwds", 1));
++	brcmf_c_ac86u_int(ifp, "maxassoc", 64);
++	brcmf_c_ac86u_cmd(ifp, AC86U_C_SET_BAND,
++			  is_2g ? WLC_BAND_2G : WLC_BAND_5G);
++	brcmf_c_ac86u_data(ifp, "country", &ccreq, sizeof(ccreq));
++	brcmf_c_ac86u_int(ifp, "nmode", -1);
++	if (!is_2g)
++		brcmf_c_ac86u_data(ifp, "bw_cap", &bw, sizeof(bw));
++}
++
++static void brcmf_c_ac86u_wme(struct brcmf_if *ifp)
++{
++	/* {ACI, ECW, TXOP} per AC, BE BK VI VO, as the stock firmware holds. */
++	static const u8 ap[4][4] = {
++		{ 0x03, 0x64, 0x00, 0x00 }, { 0x27, 0xa4, 0x00, 0x00 },
++		{ 0x41, 0x43, 0x5e, 0x00 }, { 0x61, 0x32, 0x2f, 0x00 },
++	};
++	static const u8 sta[4][4] = {
++		{ 0x03, 0xa4, 0x00, 0x00 }, { 0x27, 0xa4, 0x00, 0x00 },
++		{ 0x42, 0x43, 0x5e, 0x00 }, { 0x62, 0x32, 0x2f, 0x00 },
++	};
++	u8 buf[4];
++	int i;
++
++	brcmf_c_ac86u_int(ifp, "wme", 1);
++	for (i = 0; i < 4; i++) {
++		memcpy(buf, ap[i], sizeof(buf));
++		brcmf_c_ac86u_data(ifp, "wme_ac_ap", buf, sizeof(buf));
++	}
++	for (i = 0; i < 4; i++) {
++		memcpy(buf, sta[i], sizeof(buf));
++		brcmf_c_ac86u_data(ifp, "wme_ac_sta", buf, sizeof(buf));
++	}
++	brcmf_c_ac86u_int(ifp, "wme_apsd", 1);
++}
++
++static void brcmf_c_ac86u_down(struct brcmf_if *ifp, bool is_2g)
++{
++	struct brcm_rateset_le rs;
++	u8 tid[2];
++	int i, err;
++
++	brcmf_c_ac86u_int(ifp, "txchain", is_2g ? 0xb : 0xf);
++	brcmf_c_ac86u_int(ifp, "rxchain", is_2g ? 0xb : 0xf);
++	if (is_2g) {
++		brcmf_c_ac86u_cmd(ifp, AC86U_C_SET_GMODE, 1);
++		brcmf_c_ac86u_cmd(ifp, AC86U_C_SET_GMODE_PROT_OVERRIDE, -1);
++		brcmf_c_ac86u_cmd(ifp, AC86U_C_SET_PROTECTION_CONTROL, 2);
++	}
++	brcmf_c_ac86u_int(ifp, "nmode_protection_override", -1);
++	brcmf_c_ac86u_cmd(ifp, AC86U_C_SET_PROTECTION_CONTROL, 2);
++	brcmf_c_ac86u_int(ifp, "amsdu", -1);
++	brcmf_c_ac86u_int(ifp, "ampdu", -1);
++	for (i = 0; i < 8; i++) {
++		tid[0] = i;
++		tid[1] = 5;
++		brcmf_c_ac86u_data(ifp, "ampdu_rtylimit_tid", tid, sizeof(tid));
++	}
++	for (i = 0; i < 8; i++) {
++		tid[0] = i;
++		tid[1] = 2;
++		brcmf_c_ac86u_data(ifp, "ampdu_rr_rtylimit_tid", tid,
++				   sizeof(tid));
++	}
++	brcmf_c_ac86u_int(ifp, "amsdu", -1);
++	brcmf_c_ac86u_int(ifp, "ampdu_mpdu", -1);
++	brcmf_c_ac86u_wme(ifp);
++	err = brcmf_fil_cmd_data_get(ifp, BRCMF_C_GET_CURR_RATESET, &rs,
++				     sizeof(rs));
++	if (!err)
++		err = brcmf_fil_cmd_data_set(ifp, AC86U_C_SET_RATESET, &rs,
++					     sizeof(rs));
++	brcmf_c_ac86u_warn(ifp, "rateset", err);
++	if (is_2g)
++		brcmf_c_ac86u_cmd(ifp, AC86U_C_SET_PLCPHDR, 1);
++	brcmf_c_ac86u_cmd(ifp, BRCMF_C_SET_DTIMPRD, 3);
++	brcmf_c_ac86u_int(ifp, "vhtmode", 1);
++	brcmf_c_ac86u_int(ifp, "vht_features", is_2g ? 7 : 6);
++	brcmf_c_ac86u_int(ifp, "obss_dyn_bw", 0);
++	if (!is_2g) {
++		__le32 prot[2] = { 0, 0 };
++
++		brcmf_c_ac86u_data(ifp, "obss_prot", prot, sizeof(prot));
++	}
++	brcmf_c_ac86u_int(ifp, "bcn_rotate", 1);
++	brcmf_c_ac86u_int(ifp, "frameburst_override", 1);
++	brcmf_c_ac86u_int(ifp, "stbc_tx", -1);
++	brcmf_c_ac86u_int(ifp, "stbc_rx", 1);
++	brcmf_c_ac86u_int(ifp, "rifs_advert", -1);
++	if (is_2g)
++		brcmf_c_ac86u_int(ifp, "nar", 1);
++	brcmf_c_ac86u_int(ifp, "txbf_bfr_cap", 1);
++	brcmf_c_ac86u_int(ifp, "txbf_bfe_cap", 1);
++	brcmf_c_ac86u_int(ifp, "txbf_imp", 1);
++	brcmf_c_ac86u_int(ifp, "mu_features", 0);
++}
++
++static void brcmf_c_ac86u_up(struct brcmf_if *ifp, bool is_2g)
++{
++	brcmf_c_ac86u_int(ifp, "cal_period", 0);
++	brcmf_c_ac86u_int(ifp, "phy_percal_delay", 5);
++	brcmf_c_ac86u_warn(ifp, "pspretend_retry_limit (bss)",
++			   brcmf_fil_bsscfg_int_set(ifp,
++						    "pspretend_retry_limit",
++						    5));
++	brcmf_c_ac86u_int(ifp, "pspretend_retry_limit", 5);
++	brcmf_c_ac86u_int(ifp, "obss_coex", is_2g ? 1 : 0);
++	brcmf_c_ac86u_int(ifp, "ldpc_cap", 1);
++	brcmf_c_ac86u_int(ifp, "ampdu_mpdu", -1);
++	brcmf_c_ac86u_int(ifp, "ampdu_rts", 1);
++	brcmf_c_ac86u_int(ifp, "dy_ed_thresh", 1);
++	/* wl txpwr1 -1: 127 qdBm, no override bit */
++	brcmf_c_ac86u_int(ifp, "qtxpower", 0x7f);
++}
++
++void brcmf_c_ac86u_bringup(struct brcmf_if *ifp, enum brcmf_ac86u_stage stage)
++{
++	bool is_2g;
++
++	if (!brcmf_c_is_ac86u(ifp))
++		return;
++	is_2g = !strcmp(ifp->drvr->settings->board_type,
++			"asus,rt-ac86u-radio0");
++	switch (stage) {
++	case BRCMF_AC86U_PRE_CHANSPEC:
++		brcmf_c_ac86u_band_country(ifp, is_2g);
++		break;
++	case BRCMF_AC86U_DOWN:
++		brcmf_c_ac86u_down(ifp, is_2g);
++		break;
++	case BRCMF_AC86U_UP:
++		brcmf_c_ac86u_up(ifp, is_2g);
++		break;
++	}
++}
++
+ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
+ {
+ 	struct brcmf_pub *drvr = ifp->drvr;
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.h
+@@ -72,6 +72,14 @@
+ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp);
+ void brcmf_c_set_ac86u_led(struct brcmf_if *ifp, bool enabled);
+ void brcmf_c_stop_ac86u_led(struct brcmf_if *ifp);
++
++enum brcmf_ac86u_stage {
++	BRCMF_AC86U_PRE_CHANSPEC,	/* radio down, before chanspec */
++	BRCMF_AC86U_DOWN,		/* radio down, after chanspec */
++	BRCMF_AC86U_UP,			/* after BRCMF_C_UP */
++};
++
++void brcmf_c_ac86u_bringup(struct brcmf_if *ifp, enum brcmf_ac86u_stage stage);
+ int brcmf_c_set_cur_etheraddr(struct brcmf_if *ifp, const u8 *addr);
+ 
+ #ifdef CONFIG_DMI
+
+# <FILE>package/kernel/mac80211/patches/brcm/875-brcmfmac-ac86u-stock-bringup.patch</FILE> - <DESC>Apply the radio settings the ASUS RT-AC86U firmware sets around AP bring-up, in its order and values; not required for the 2.4 GHz fix (876).</DESC>
+# <VERS>END OF VERSION: 0.1.2</VERS>

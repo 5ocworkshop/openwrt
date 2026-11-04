@@ -1,8 +1,8 @@
 #!/bin/sh
 # <FILE>target/linux/bcm4908/base-files/usr/libexec/ac86u-radio-nvram</FILE> - <DESC>Validate preserved per-device radio settings and publish private RAM firmware inputs.</DESC>
-# <VERS>VERSION: 0.1.1</VERS>
-# <WCTX>Use stock brcmfmac with this router's preserved settings without embedding per-device values.</WCTX>
-# <CLOG>Publish validated per-device radio settings atomically with bounded read-only discovery and strict RAM output ownership.</CLOG>
+# <VERS>VERSION: 0.4.0</VERS>
+# <WCTX>brcmfmac S3 equivalency image: take each unit's country from its own radio nvram.</WCTX>
+# <CLOG>Own ccode/regrev rows are copied unchanged; a radio without ccode gets ccode=CA and regrev=987 (its own regrev kept if present).</CLOG>
 
 set -eu
 umask 077
@@ -40,7 +40,11 @@ usage() {
         'DIR.owner records only version and output hashes. Owned valid output is reused.' \
         'Compatible defaults to /sys/firmware/devicetree/base/compatible; other boards are a no-op.' \
         'MTD inventory/device root default to /proc/mtd and /dev; paths must be absolute.' \
-        'Dry run validates without publishing. Preparation waits at most five seconds for a lock.'
+        'Dry run validates without publishing. Preparation waits at most five seconds for a lock.' \
+        'Each radio file starts with wlunit=<radio>; a global boardrev row follows' \
+        'in each radio file without its own boardrev.' \
+        'Each radio keeps its own ccode/regrev; a radio without ccode gets' \
+        'ccode=CA and regrev=987 (its own regrev is kept if present).'
 }
 
 safe_path() {
@@ -276,11 +280,18 @@ function usable_mac(value, octets, i, first, joined) {
         section=line; sub(/:.*/, "", section)
         if ("x" section != "x0" && "x" section != "x1") reject("Unexpected radio prefix")
     }
+    if (substr(line,1,9)=="boardrev=") {
+        if (global_rev_seen) reject("Duplicate global boardrev row")
+        global_rev=substr(line,10); global_rev_seen=1
+        if (integer(global_rev) < 0) reject("Invalid global boardrev row")
+        next
+    }
     if (substr(line,1,2)!="0:" && substr(line,1,2)!="1:") next
     radio=substr(line,1,1)+0; payload=substr(line,3); equal=index(payload,"=")
     if (!equal || payload ~ /[^ -~]/ || index(payload,"#")) reject("Malformed calibration row")
     key=substr(payload,1,equal-1); value=substr(payload,equal+1)
     if (key !~ /^[A-Za-z][A-Za-z0-9_]*$/) reject("Invalid calibration key")
+    if (key == "wlunit") reject("Reserved wlunit row")
     if (tolower(key) ~ /password|passwd|secret|ssid|serial|private|token|credential|psk|wep/) reject("Sensitive-looking calibration key")
     if ((radio SUBSEP key) in values) reject("Duplicate calibration key")
     values[radio,key]=value; counts[radio]++; rows[radio]=rows[radio] payload "\n"
@@ -297,10 +308,19 @@ END {
     if (tolower(values[0,"macaddr"]) == tolower(values[1,"macaddr"])) reject("Radio MACs must be distinct")
     for (radio=0; radio<2; radio++) {
         file=ENVIRON["AC86U_STAGE"] "/" ENVIRON["AC86U_PREFIX"] radio ".txt"
-        printf "%s", rows[radio] > file
+        head="wlunit=" radio "\n"
+        if (global_rev_seen && !((radio SUBSEP "boardrev") in values)) head=head "boardrev=" global_rev "\n"
+        tail=""; country[radio]="own"
+        if (!((radio SUBSEP "ccode") in values)) {
+            tail="ccode=CA\n"; country[radio]="default CA/987"
+            if (!((radio SUBSEP "regrev") in values)) tail=tail "regrev=987\n"
+        }
+        printf "%s%s%s", head, rows[radio], tail > file
         if (close(file) != 0) reject("Calibration output write failed")
     }
     printf "Validated radio key counts: %d, %d; values withheld\n",counts[0],counts[1]
+    printf "boardrev: global row %s\n", (global_rev_seen ? "copied where a radio has none" : "absent")
+    printf "ccode: radio0 %s, radio1 %s\n", country[0], country[1]
 }
 ' "$source_file" > "$stage/counts" || fail 'Radio data validation or read failed'
 read_hash=$(digest "$source_file") || fail 'Could not fingerprint source after reading'
@@ -329,4 +349,4 @@ verify_pair
 printf '[ac86u-radio-nvram] Published private radio pair; values withheld\n'
 
 # <FILE>target/linux/bcm4908/base-files/usr/libexec/ac86u-radio-nvram</FILE> - <DESC>Validate preserved per-device radio settings and publish private RAM firmware inputs.</DESC>
-# <VERS>END OF VERSION: 0.1.1</VERS>
+# <VERS>END OF VERSION: 0.4.0</VERS>

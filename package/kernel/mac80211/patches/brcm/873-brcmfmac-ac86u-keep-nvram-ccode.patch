@@ -1,0 +1,38 @@
+# <FILE>package/kernel/mac80211/patches/brcm/873-brcmfmac-ac86u-keep-nvram-ccode.patch</FILE> - <DESC>Pass the RT-AC86U nvram ccode to the firmware unchanged, as stock DHD does.</DESC>
+# <VERS>VERSION: 0.1.0</VERS>
+# <WCTX>brcmfmac S3 equivalency image: give each radio the firmware-load inputs stock DHD sends.</WCTX>
+# <CLOG>New: skip the 870-02 ccode interception on asus,rt-ac86u so the firmware loads with ccode=CA regrev=987 like stock.</CLOG>
+
+Subject: [PATCH] brcmfmac: keep the nvram ccode on RT-AC86U
+
+Patch 870-02 comments out the first ccode= line of the nvram file and only
+hands it back through the regulatory notifier. On BCM4366 that notifier
+needs a ccode map, and it substitutes the saved code only when the firmware
+reports a non-uppercase country, so the firmware may never run the stock
+country. Stock DHD sends ccode=CA with regrev=987 in the firmware variables.
+Skip the interception on asus,rt-ac86u so both radios load CA/987 as stock.
+
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/firmware.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/firmware.c
+@@ -11,6 +11,7 @@
+ #include <linux/module.h>
+ #include <linux/bcm47xx_nvram.h>
+ #include <linux/ctype.h>
++#include <linux/of.h>
+ 
+ #include "debug.h"
+ #include "firmware.h"
+@@ -575,7 +576,9 @@
+ 	}
+ 
+ 	if (data) {
+-		char *ccode = strnstr((char *)data, "ccode=", data_len);
++		/* RT-AC86U: keep ccode for the firmware, as stock DHD does. */
++		char *ccode = of_machine_is_compatible("asus,rt-ac86u") ? NULL :
++			      strnstr((char *)data, "ccode=", data_len);
+ 		/* Ensure this is a whole token */
+ 		if (ccode && ((void *)ccode == (void *)data || isspace(ccode[-1]))) {
+ 			/* Comment out the line */
+
+# <FILE>package/kernel/mac80211/patches/brcm/873-brcmfmac-ac86u-keep-nvram-ccode.patch</FILE> - <DESC>Pass the RT-AC86U nvram ccode to the firmware unchanged, as stock DHD does.</DESC>
+# <VERS>END OF VERSION: 0.1.0</VERS>
